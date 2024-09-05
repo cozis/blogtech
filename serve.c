@@ -478,6 +478,8 @@ typedef struct Connection Connection;
 struct Connection {
 	ByteQueue input;
 	ByteQueue output;
+	int served_count;
+	bool closing;
 };
 
 #define MAX_CONNECTIONS 1024
@@ -569,6 +571,22 @@ void byte_queue_end_read(ByteQueue *q, size_t num)
     q->size -= num;
 }
 
+bool byte_queue_write(ByteQueue *q, const char *src, size_t num)
+{
+	if (!byte_queue_ensure_min_free_space(q, num))
+		return false;
+	char *dst = byte_queue_start_write(q);
+	memcpy(dst, src, num);
+	byte_queue_end_write(q, num);
+	return true;
+}
+
+void byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len)
+{
+	// TODO: Safety checks
+	memcpy(q->data + q->head + offset, src, len);
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -622,7 +640,135 @@ void print_bytes(const char *prefix, const char *str, size_t len)
 	}
 }
 
-void respond(Request request, ByteQueue *output);
+
+typedef enum {
+	R_STATUS,
+	R_HEADER,
+	R_CONTENT,
+	R_COMPLETE,
+} ResponseBuilderState;
+
+typedef struct {
+	ResponseBuilderState state;
+	Connection *conn;
+	bool failed;
+	bool keep_alive;
+	size_t content_length_offset;
+	size_t content_offset;
+} ResponseBuilder;
+
+void response_builder_init(ResponseBuilder *b, Connection *conn)
+{
+	b->state = R_STATUS;
+	b->conn = conn;
+	b->failed = false;
+	b->keep_alive = true;
+	b->content_length_offset = -1;
+	b->content_offset = -1;
+}
+
+void status_line(ResponseBuilder *b, int status)
+{
+	if (b->state != R_STATUS) {
+		printf("Appending status line twice\n");
+		abort();
+	}
+	if (b->failed)
+		return;
+	char buf[1<<10];
+	int num = snprintf(buf, sizeof(buf), "HTTP/1.1 %d %s\r\n", status, get_status_string(status));
+	assert(num > 0);
+	if (!byte_queue_write(&b->conn->output, buf, num)) {
+		b->failed = true;
+		return;
+	}
+	b->state = R_HEADER;
+}
+
+void add_header(ResponseBuilder *b, const char *header)
+{
+	if (b->state != R_HEADER) {
+		if (b->state == R_STATUS)
+			printf("Didn't write status line before headers\n");
+		else
+			printf("Can't add headers after content\n");
+		abort();
+	}
+	if (b->failed)
+		return;
+	if (!byte_queue_write(&b->conn->output, header, strlen(header)) ||
+		!byte_queue_write(&b->conn->output, "\r\n", 2)) {
+		b->failed = true;
+		return;
+	}
+}
+
+void append_special_headers(ResponseBuilder *b)
+{
+	// TODO: Choose a keep-alive policy
+	add_header(b, "Connection: Keep-Alive");
+	b->content_length_offset = byte_queue_used_space(&b->conn->output) + sizeof("Content-Length: ") - 1;
+	add_header(b, "Content-Length:          ");
+	if (!byte_queue_write(&b->conn->output, "\r\n", 2))
+		b->failed = true;
+	b->content_offset = byte_queue_used_space(&b->conn->output);
+}
+
+void append_content_string(ResponseBuilder *b, const char *str)
+{
+	if (b->state != R_HEADER && b->state != R_CONTENT) {
+		printf("Invalid response builder state\n");
+		abort();
+	}
+	if (b->state == R_HEADER) {
+		append_special_headers(b);
+		b->state = R_CONTENT;
+	}
+	if (b->failed)
+		return;
+	if (!byte_queue_write(&b->conn->output, str, strlen(str))) {
+		b->failed = true;
+		return;
+	}
+}
+
+void response_builder_complete(ResponseBuilder *b)
+{
+	if (b->state == R_COMPLETE)
+		return;
+
+	if (b->failed)
+		return;
+
+	if (b->state == R_HEADER) {
+		append_special_headers(b);
+		if (b->failed) return;
+	} else {
+		if (b->state != R_CONTENT) {
+			printf("Invalid response builder state\n");
+			abort();
+		}
+	}
+	size_t current_offset = byte_queue_used_space(&b->conn->output);
+	size_t content_length = current_offset - b->content_offset;
+
+	if (content_length > 1<<30) {
+		// Content larger than 1GB
+		b->failed = true;
+		return;
+	}
+	int content_length_int = (int) content_length;
+
+	char content_length_string[128];
+	int n = snprintf(content_length_string, sizeof(content_length_string), "%d", content_length_int);
+	assert(n >= 1 && n <= 9);
+
+	byte_queue_patch(&b->conn->output, b->content_length_offset, content_length_string, n);
+
+	b->state = R_COMPLETE;
+}
+
+void respond(Request request, ResponseBuilder *b);
 
 int main(int argc, char **argv)
 {
@@ -699,6 +845,8 @@ int main(int argc, char **argv)
 				pollarray[free_index].revents = 0;
 				byte_queue_init(&conns[free_index-1].input);
 				byte_queue_init(&conns[free_index-1].output);
+				conns[free_index-1].served_count = 0;
+				conns[free_index-1].closing = false;
 			}
 		}
 
@@ -770,26 +918,42 @@ int main(int argc, char **argv)
 						Slice content_length_header;
 						size_t content_length;
 						if (!find_header(&request, "Content-Length", &content_length_header)) {
-							content_length = 0;
+
+							if (find_and_parse_transfer_encoding(&request) & T_CHUNKED) {
+								const char msg[] = "HTTP/1.1 411 Length Required\r\nConnection: Close\r\n\r\n";
+								byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+								conn->closing = true;
+								break;
+							} else
+								content_length = 0;
+
 						} else {
 							content_length = parse_content_length(content_length_header);
-						}
-
-						if (content_length == (size_t) -1) {
-							// TODO
-							printf("Invalid Content-Length\n");
-							abort();
-						} else {
-							size_t request_length = head_length + content_length;
-							if (len >= request_length) {
-								// Respond
-								respond(request, &conn->output);
-								byte_queue_end_read(&conn->input, request_length);
-								if (byte_queue_used_space(&conn->output) > 0) {
-									pollarray[i].events |= POLLOUT;
-								}
+							if (content_length == (size_t) -1) {
+								const char msg[] = "HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n\r\n";
+								byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+								conn->closing = true;
+								break;
 							}
 						}
+
+						size_t request_length = head_length + content_length;
+						if (len >= request_length) {
+							// Respond
+							ResponseBuilder builder;
+							response_builder_init(&builder, conn);
+							respond(request, &builder);
+							response_builder_complete(&builder);
+							if (builder.failed)
+								remove = true;
+							else {
+								conn->served_count++;
+								byte_queue_end_read(&conn->input, request_length);
+								if (byte_queue_used_space(&conn->output) > 0)
+									pollarray[i].events |= POLLOUT;
+							}
+						}
+
 					} /* Respond loop end */
 				}
 			}
@@ -801,6 +965,8 @@ int main(int argc, char **argv)
 
 					if (len == 0) {
 						pollarray[i].events &= ~POLLOUT;
+						if (conn->closing)
+							remove = true;
 						break;
 					}
 
@@ -836,20 +1002,22 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-void respond(Request request, ByteQueue *output)
+void respond(Request request, ResponseBuilder *b)
 {
-	char buffer[1<<10];
-	int num = snprintf(buffer, sizeof(buffer), "HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello!");
-	assert(num > 0);
-
-	if (!byte_queue_ensure_min_free_space(output, num)) {
-		printf("Out of memory\n");
-		abort();
+	if (request.major != 1 || request.minor > 1) {
+		status_line(b, 505); // HTTP Version Not Supported
 	}
 
-	char *dst = byte_queue_start_write(output);
-	
-	memcpy(dst, buffer, num);
+	if (request.method != M_GET) {
+		status_line(b, 405); // Method Not Allowed
+		return;
+	}
 
-	byte_queue_end_write(output, num);
+	if (string_match_case_insensitive(request.path, str_to_slice("/hello"))) {
+		status_line(b, 200);
+		append_content_string(b, "Hello, world!");
+		return;
+	}
+
+	status_line(b, 404);
 }
