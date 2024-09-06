@@ -11,11 +11,48 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <time.h>
+
+#define SHOW_IO 0
+#define REQUEST_TIMEOUT_SEC 5
+#define CLOSING_TIMEOUT_SEC 2
+#define CONNECTION_TIMEOUT_SEC 60
+
+uint64_t get_current_time_ms(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ret) {
+		printf("Couldn't read time\n");
+		abort();
+	}
+	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000) {
+		printf("Time overflow\n");
+		abort();
+	}
+	uint64_t ms = ts.tv_sec * 1000;
+
+	uint64_t nsec_part = ts.tv_nsec / 1000000;
+	if (ms > UINT64_MAX - nsec_part) {
+		printf("Time overflow\n");
+		abort();
+	}
+	ms += nsec_part;
+	return ms;
+}
 
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #define MAX(X, Y) ((X) < (Y) ? (X) : (Y))
 #define SIZEOF(X) ((ssize_t) sizeof(X))
 #define COUNTOF(X) (SIZEOF(X) / SIZEOF((X)[0]))
+
+void *mymalloc(size_t num)
+{
+	int x = 1; // rand();
+	if (x & 1)
+		return malloc(num);
+	return NULL;
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -474,27 +511,6 @@ typedef struct {
     size_t capacity;
 } ByteQueue;
 
-typedef struct Connection Connection;
-struct Connection {
-	ByteQueue input;
-	ByteQueue output;
-	int served_count;
-	bool closing;
-};
-
-#define MAX_CONNECTIONS 1024
-struct pollfd pollarray[MAX_CONNECTIONS+1];
-Connection conns[MAX_CONNECTIONS];
-
-void init_globals(void)
-{
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		pollarray[i].fd = -1;
-		pollarray[i].events = 0;
-		pollarray[i].revents = 0;
-	}
-}
-
 void byte_queue_init(ByteQueue *q)
 {
     q->data = NULL;
@@ -506,6 +522,7 @@ void byte_queue_init(ByteQueue *q)
 void byte_queue_free(ByteQueue *q)
 {
     free(q->data);
+	byte_queue_init(q);
 }
 
 size_t byte_queue_used_space(ByteQueue *q)
@@ -530,7 +547,7 @@ bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
             size_t capacity = 2 * q->capacity;
             if (capacity - q->size < num) capacity = q->size + num;
 
-            char *data = malloc(capacity);
+            char *data = mymalloc(capacity);
             if (!data) return false;
 
             if (q->size > 0)
@@ -638,8 +655,19 @@ void print_bytes(const char *prefix, const char *str, size_t len)
 			i++;
 		}
 	}
+
+	if (!line_start)
+		putc('\n', stream);
 }
 
+typedef struct {
+	ByteQueue input;
+	ByteQueue output;
+	int served_count;
+	bool closing;
+	uint64_t creation_time;
+	uint64_t start_time;
+} Connection;
 
 typedef enum {
 	R_STATUS,
@@ -673,14 +701,12 @@ void status_line(ResponseBuilder *b, int status)
 		printf("Appending status line twice\n");
 		abort();
 	}
-	if (b->failed)
-		return;
-	char buf[1<<10];
-	int num = snprintf(buf, sizeof(buf), "HTTP/1.1 %d %s\r\n", status, get_status_string(status));
-	assert(num > 0);
-	if (!byte_queue_write(&b->conn->output, buf, num)) {
-		b->failed = true;
-		return;
+	if (!b->failed) {
+		char buf[1<<10];
+		int num = snprintf(buf, sizeof(buf), "HTTP/1.1 %d %s\r\n", status, get_status_string(status));
+		assert(num > 0);
+		if (!byte_queue_write(&b->conn->output, buf, num))
+			b->failed = true;
 	}
 	b->state = R_HEADER;
 }
@@ -703,10 +729,21 @@ void add_header(ResponseBuilder *b, const char *header)
 	}
 }
 
+bool should_keep_alive(Connection *conn);
+
+uint64_t now;
+
 void append_special_headers(ResponseBuilder *b)
 {
-	// TODO: Choose a keep-alive policy
-	add_header(b, "Connection: Keep-Alive");
+	if (should_keep_alive(b->conn))
+		add_header(b, "Connection: Keep-Alive");
+	else {
+		add_header(b, "Connection: Close");
+		b->conn->closing = true;
+		b->conn->start_time = now;
+		// TODO: Stop monitoring POLLIN
+	}
+
 	b->content_length_offset = byte_queue_used_space(&b->conn->output) + sizeof("Content-Length: ") - 1;
 	add_header(b, "Content-Length:          ");
 	if (!byte_queue_write(&b->conn->output, "\r\n", 2))
@@ -716,13 +753,13 @@ void append_special_headers(ResponseBuilder *b)
 
 void append_content_string(ResponseBuilder *b, const char *str)
 {
-	if (b->state != R_HEADER && b->state != R_CONTENT) {
-		printf("Invalid response builder state\n");
-		abort();
-	}
 	if (b->state == R_HEADER) {
 		append_special_headers(b);
 		b->state = R_CONTENT;
+	}
+	if (b->state != R_CONTENT) {
+		printf("Invalid response builder state\n");
+		abort();
 	}
 	if (b->failed)
 		return;
@@ -770,9 +807,46 @@ void response_builder_complete(ResponseBuilder *b)
 
 void respond(Request request, ResponseBuilder *b);
 
+#define MAX_CONNECTIONS 1024
+
+struct pollfd pollarray[MAX_CONNECTIONS+1];
+Connection conns[MAX_CONNECTIONS];
+int num_conns = 0;
+
+bool should_keep_alive(Connection *conn)
+{
+	// Don't keep alive if the request is too old
+	if (now - conn->creation_time > CONNECTION_TIMEOUT_SEC * 1000)
+		return false;
+
+	// Don't keep alive if we served a lot of requests to this connection
+	if (conn->served_count > 100)
+		return false;
+
+	// Don't keep alive if the server is more than 70% full
+	if (num_conns > 0.7 * MAX_CONNECTIONS)
+		return false;
+
+	return true;
+}
+
+uint64_t deadline_of(Connection *conn)
+{
+	return conn->start_time + (conn->closing ? CLOSING_TIMEOUT_SEC : REQUEST_TIMEOUT_SEC) * 1000;
+}
+
 int main(int argc, char **argv)
 {
-	init_globals();
+	for (int i = 0; i < MAX_CONNECTIONS+1; i++) {
+		pollarray[i].fd = -1;
+		pollarray[i].events = 0;
+		pollarray[i].revents = 0;
+	}
+
+	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+		byte_queue_init(&conns[i].input);
+		byte_queue_init(&conns[i].output);
+	}
 
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
@@ -805,14 +879,18 @@ int main(int argc, char **argv)
 	pollarray[0].fd = listen_fd;
 	pollarray[0].events = POLLIN;
 
+	int timeout = -1;
 	while (1) {
-		int ret = poll(pollarray, MAX_CONNECTIONS, -1);
+
+		int ret = poll(pollarray, MAX_CONNECTIONS, timeout);
 		if (ret < 0) {
 			if (errno == EINTR)
 				break;
 			perror("poll");
 			return -1;
 		}
+
+		now = get_current_time_ms();
 
 		if (pollarray[0].revents) {
 			for (;;) {
@@ -845,10 +923,15 @@ int main(int argc, char **argv)
 				pollarray[free_index].revents = 0;
 				byte_queue_init(&conns[free_index-1].input);
 				byte_queue_init(&conns[free_index-1].output);
-				conns[free_index-1].served_count = 0;
 				conns[free_index-1].closing = false;
+				conns[free_index-1].served_count = 0;
+				conns[free_index-1].creation_time = now;
+				conns[free_index-1].start_time = now;
+				num_conns++;
 			}
 		}
+
+		Connection *oldest = NULL;
 
 		for (int i = 1; i-1 < MAX_CONNECTIONS; i++) {
 
@@ -858,13 +941,29 @@ int main(int argc, char **argv)
 			Connection *conn = &conns[i-1];
 			bool remove = false;
 
-			if (pollarray[i].revents & POLLIN) {
+			if (!remove && now >= deadline_of(conn)) {
+
+				if (conn->closing) {
+					// Closing timeout
+					remove = true;
+				} else {
+					// Request timeout
+					const char msg[] = "HTTP/1.1 408 Request Timeout\r\nConnection: Close\r\n\r\n";
+					byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+					conn->closing = true;
+					conn->start_time = now;
+					pollarray[i].events &= ~POLLIN;
+					pollarray[i].events |= POLLOUT;
+					pollarray[i].revents |= POLLOUT;
+				}
+
+			} else if (!remove && (pollarray[i].revents & POLLIN)) {
 
 				for (;;) {
 
 					if (!byte_queue_ensure_min_free_space(&conn->input, 512)) {
-						printf("Out of memory\n");
-						abort();
+						remove = true;
+						break;
 					}
 
 					char  *dst = byte_queue_start_write(&conn->input);
@@ -884,7 +983,9 @@ int main(int argc, char **argv)
 						break;
 					}
 
-					//print_bytes("> ", dst, num);
+#if SHOW_IO
+					print_bytes("> ", dst, num);
+#endif
 
 					byte_queue_end_write(&conn->input, (size_t) num);
 				}
@@ -910,9 +1011,15 @@ int main(int argc, char **argv)
 						Request request;
 						int res = parse_request_head(src, head_length, &request);
 						if (res != P_OK) {
-							// TODO
-							printf("Couldn't parse request\n");
-							abort();
+							// Invalid HTTP request
+							const char msg[] = "HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n\r\n";
+							byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+							pollarray[i].events &= ~POLLIN;
+							pollarray[i].events |= POLLOUT;
+							pollarray[i].revents |= POLLOUT;
+							conn->closing = true;
+							conn->start_time = now;
+							break;
 						}
 
 						Slice content_length_header;
@@ -920,9 +1027,14 @@ int main(int argc, char **argv)
 						if (!find_header(&request, "Content-Length", &content_length_header)) {
 
 							if (find_and_parse_transfer_encoding(&request) & T_CHUNKED) {
+								// Content-Length missing
 								const char msg[] = "HTTP/1.1 411 Length Required\r\nConnection: Close\r\n\r\n";
 								byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+								pollarray[i].events &= ~POLLIN;
+								pollarray[i].events |= POLLOUT;
+								pollarray[i].revents |= POLLOUT;
 								conn->closing = true;
+								conn->start_time = now;
 								break;
 							} else
 								content_length = 0;
@@ -930,15 +1042,36 @@ int main(int argc, char **argv)
 						} else {
 							content_length = parse_content_length(content_length_header);
 							if (content_length == (size_t) -1) {
+								// Invalid Content-Length
 								const char msg[] = "HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n\r\n";
 								byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+								pollarray[i].events &= ~POLLIN;
+								pollarray[i].events |= POLLOUT;
+								pollarray[i].revents |= POLLOUT;
 								conn->closing = true;
+								conn->start_time = now;
 								break;
 							}
 						}
 
+						if (content_length > 1<<20) {
+							// Request too large
+							const char msg[] = "HTTP/1.1 413 Content Too Large\r\nConnection: Close\r\n\r\n";
+							byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+							pollarray[i].events &= ~POLLIN;
+							pollarray[i].events |= POLLOUT;
+							pollarray[i].revents |= POLLOUT;
+							conn->closing = true;
+								conn->start_time = now;
+							break;
+						}
+
 						size_t request_length = head_length + content_length;
 						if (len >= request_length) {
+
+							// Reset the request timer
+							conns->start_time = now;
+							
 							// Respond
 							ResponseBuilder builder;
 							response_builder_init(&builder, conn);
@@ -949,16 +1082,19 @@ int main(int argc, char **argv)
 							else {
 								conn->served_count++;
 								byte_queue_end_read(&conn->input, request_length);
-								if (byte_queue_used_space(&conn->output) > 0)
+								if (byte_queue_used_space(&conn->output) > 0) {
 									pollarray[i].events |= POLLOUT;
+									pollarray[i].revents |= POLLOUT;
+								}
 							}
 						}
 
 					} /* Respond loop end */
 				}
-			}
+			} /* POLLIN */
 
 			if (!remove && (pollarray[i].revents & POLLOUT)) {
+
 				for (;;) {
 					char  *src = byte_queue_start_read(&conn->output);
 					size_t len = byte_queue_used_space(&conn->output);
@@ -980,11 +1116,12 @@ int main(int argc, char **argv)
 						return -1;
 					}
 
-					//print_bytes("< ", src, num);
-
+#if SHOW_IO
+					print_bytes("< ", src, num);
+#endif
 					byte_queue_end_read(&conn->output, (size_t) num);
 				}
-			}
+			} /* POLLOUT */
 
 			pollarray[i].revents = 0;
 
@@ -994,10 +1131,34 @@ int main(int argc, char **argv)
 				pollarray[i].events = 0;
 				byte_queue_free(&conn->input);
 				byte_queue_free(&conn->output);
+				conn->start_time = -1;
+				conn->closing = false;
+				conn->creation_time = 0;
+				num_conns--;
+			} else {
+				if (oldest == NULL || deadline_of(oldest) > deadline_of(conn)) oldest = conn;
 			}
 		}
-	}
 
+		/*
+		 * Calculate the timeout for the next poll
+		 */
+		if (oldest == NULL)
+			timeout = -1;
+		else {
+			if (deadline_of(oldest) < now) timeout = 0;
+			else timeout = deadline_of(oldest) - now;
+		}
+
+	} /* main loop end */
+
+	for (int i = 0; i < MAX_CONNECTIONS+1; i++)
+		if (pollarray[i].fd != -1)
+			close(pollarray[i].fd);
+	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+		byte_queue_free(&conns[i].input);
+		byte_queue_free(&conns[i].output);
+	}
 	close(listen_fd);
 	return 0;
 }
