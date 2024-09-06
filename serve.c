@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -14,6 +15,7 @@
 #include <time.h>
 
 #define SHOW_IO 0
+#define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
 #define CONNECTION_TIMEOUT_SEC 60
@@ -624,10 +626,8 @@ static bool set_blocking(int fd, bool blocking)
 	return true;
 }
 
-void print_bytes(const char *prefix, const char *str, size_t len)
+void print_bytes(FILE *stream, const char *prefix, const char *str, size_t len)
 {
-	FILE *stream = stdout;
-
 	bool line_start = true;
 
 	size_t i = 0;
@@ -835,6 +835,21 @@ uint64_t deadline_of(Connection *conn)
 	return conn->start_time + (conn->closing ? CLOSING_TIMEOUT_SEC : REQUEST_TIMEOUT_SEC) * 1000;
 }
 
+FILE *logfile;
+
+void fperror(FILE *stream, const char *str)
+{
+	fprintf(stream, "%s: %s\n", str, strerror(errno));
+}
+
+bool stop = false;
+
+void handle_sigterm(int signum) 
+{
+	(void) signum;
+	stop = true;
+}
+
 int main(int argc, char **argv)
 {
 	for (int i = 0; i < MAX_CONNECTIONS+1; i++) {
@@ -848,14 +863,20 @@ int main(int argc, char **argv)
 		byte_queue_init(&conns[i].output);
 	}
 
+	signal(SIGTERM, handle_sigterm);
+	signal(SIGQUIT, handle_sigterm);
+	signal(SIGINT,  handle_sigterm);
+
+	logfile = fopen("log.txt", "ab");
+
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
-		perror("socket");
+		fperror(logfile, "socket");
 		return -1;
 	}
 
 	if (!set_blocking(listen_fd, false)) {
-		perror("fcntl");
+		fperror(logfile, "fcntl");
 		return -1;
 	}
 
@@ -867,12 +888,12 @@ int main(int argc, char **argv)
 	addr.sin_port = htons(8080);
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
-		perror("bind");
+		fperror(logfile, "bind");
 		return -1;
 	}
 
 	if (listen(listen_fd, 32)) {
-		perror("listen");
+		fperror(logfile, "listen");
 		return -1;
 	}
 
@@ -880,13 +901,13 @@ int main(int argc, char **argv)
 	pollarray[0].events = POLLIN;
 
 	int timeout = -1;
-	while (1) {
+	while (!stop) {
 
 		int ret = poll(pollarray, MAX_CONNECTIONS, timeout);
 		if (ret < 0) {
 			if (errno == EINTR)
 				break;
-			perror("poll");
+			fperror(logfile, "poll");
 			return -1;
 		}
 
@@ -910,11 +931,11 @@ int main(int argc, char **argv)
 						continue;
 					if (errno == EAGAIN || errno == EWOULDBLOCK)
 						break;
-					perror("accept");
+					fperror(logfile, "accept");
 					return -1;
 				}
 				if (!set_blocking(accepted_fd, false)) {
-					perror("fcntl");
+					fperror(logfile, "fcntl");
 					return -1;
 				}
 
@@ -946,6 +967,7 @@ int main(int argc, char **argv)
 				if (conn->closing) {
 					// Closing timeout
 					remove = true;
+					fprintf(logfile, "Closing timeout\n");
 				} else {
 					// Request timeout
 					const char msg[] = "HTTP/1.1 408 Request Timeout\r\nConnection: Close\r\n\r\n";
@@ -955,6 +977,7 @@ int main(int argc, char **argv)
 					pollarray[i].events &= ~POLLIN;
 					pollarray[i].events |= POLLOUT;
 					pollarray[i].revents |= POLLOUT;
+					fprintf(logfile, "Request timeout\n");
 				}
 
 			} else if (!remove && (pollarray[i].revents & POLLIN)) {
@@ -984,7 +1007,7 @@ int main(int argc, char **argv)
 					}
 
 #if SHOW_IO
-					print_bytes("> ", dst, num);
+					print_bytes(logfile, "> ", dst, num);
 #endif
 
 					byte_queue_end_write(&conn->input, (size_t) num);
@@ -1005,8 +1028,10 @@ int main(int argc, char **argv)
 							break;
 						size_t head_length = j+4;
 
-						//print_bytes("REQUEST | ", src, head_length);
-
+#if SHOW_REQUESTS
+						print_bytes(logfile, "", src, head_length);
+						putc('\n', logfile);
+#endif
 						// Found! We got the request head
 						Request request;
 						int res = parse_request_head(src, head_length, &request);
@@ -1035,6 +1060,7 @@ int main(int argc, char **argv)
 								pollarray[i].revents |= POLLOUT;
 								conn->closing = true;
 								conn->start_time = now;
+								fprintf(logfile, "Content-Length missing\n");
 								break;
 							} else
 								content_length = 0;
@@ -1050,6 +1076,7 @@ int main(int argc, char **argv)
 								pollarray[i].revents |= POLLOUT;
 								conn->closing = true;
 								conn->start_time = now;
+								fprintf(logfile, "Invalid Content-Length\n");
 								break;
 							}
 						}
@@ -1062,7 +1089,8 @@ int main(int argc, char **argv)
 							pollarray[i].events |= POLLOUT;
 							pollarray[i].revents |= POLLOUT;
 							conn->closing = true;
-								conn->start_time = now;
+							conn->start_time = now;
+							fprintf(logfile, "Request too large\n");
 							break;
 						}
 
@@ -1112,12 +1140,12 @@ int main(int argc, char **argv)
 							continue;
 						if (errno == EAGAIN || errno == EWOULDBLOCK)
 							break;
-						perror("send");
+						fperror(logfile, "send");
 						return -1;
 					}
 
 #if SHOW_IO
-					print_bytes("< ", src, num);
+					print_bytes(logfile, "< ", src, num);
 #endif
 					byte_queue_end_read(&conn->output, (size_t) num);
 				}
@@ -1159,7 +1187,9 @@ int main(int argc, char **argv)
 		byte_queue_free(&conns[i].input);
 		byte_queue_free(&conns[i].output);
 	}
+	fprintf(logfile, "closing\n");
 	close(listen_fd);
+	fclose(logfile);
 	return 0;
 }
 
