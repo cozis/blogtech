@@ -8,14 +8,17 @@
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
+#include <dirent.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <time.h>
 
-#define SHOW_IO 0
-#define SHOW_REQUESTS 1
+#define SHOW_IO 1
+#define SHOW_REQUESTS 0
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
 #define CONNECTION_TIMEOUT_SEC 60
@@ -729,6 +732,25 @@ void add_header(ResponseBuilder *b, const char *header)
 	}
 }
 
+void add_header_f(ResponseBuilder *b, const char *format, ...)
+{
+	char buffer[1<<10];
+
+	va_list args;
+	va_start(args, format);
+	int num = vsnprintf(buffer, sizeof(buffer), format, args);
+	va_end(args);
+
+	if (num < 0 || num >= (int) sizeof(buffer)) {
+		b->failed = true;
+		return;
+	}
+
+	buffer[num] = '\0';
+
+	add_header(b, buffer);
+}
+
 bool should_keep_alive(Connection *conn);
 
 uint64_t now;
@@ -751,7 +773,7 @@ void append_special_headers(ResponseBuilder *b)
 	b->content_offset = byte_queue_used_space(&b->conn->output);
 }
 
-void append_content_string(ResponseBuilder *b, const char *str)
+void append_content_s(ResponseBuilder *b, const char *str)
 {
 	if (b->state == R_HEADER) {
 		append_special_headers(b);
@@ -763,9 +785,62 @@ void append_content_string(ResponseBuilder *b, const char *str)
 	}
 	if (b->failed)
 		return;
+
 	if (!byte_queue_write(&b->conn->output, str, strlen(str))) {
 		b->failed = true;
 		return;
+	}
+}
+
+char *append_content_start(ResponseBuilder *b, size_t cap)
+{
+	if (b->state == R_HEADER) {
+		append_special_headers(b);
+		b->state = R_CONTENT;
+	}
+	if (b->state != R_CONTENT) {
+		printf("Invalid response builder state\n");
+		abort();
+	}
+	if (b->failed)
+		return NULL;
+
+	if (!byte_queue_ensure_min_free_space(&b->conn->output, cap)) {
+		b->failed = true;
+		return NULL;
+	}
+	return byte_queue_start_write(&b->conn->output);
+}
+
+void append_content_end(ResponseBuilder *b, size_t num)
+{
+	byte_queue_end_write(&b->conn->output, num);
+}
+
+void append_content_f(ResponseBuilder *b, const char *fmt, ...)
+{
+	size_t cap = 128;
+
+	for (;;) {
+
+		char *dst = append_content_start(b, cap);
+		if (dst == NULL)
+			return;
+
+		va_list args;
+		va_start(args, fmt);
+
+		int num = vsnprintf(dst, cap, fmt, args);
+		assert(num >= 0);
+
+		va_end(args);
+
+		if ((size_t) num < cap) {
+			append_content_end(b, num);
+			break;
+		}
+
+		cap *= 2;
 	}
 }
 
@@ -1005,38 +1080,65 @@ int main(int argc, char **argv)
 						remove = true;
 						break;
 					}
-
 #if SHOW_IO
 					print_bytes(logfile, "> ", dst, num);
 #endif
-
 					byte_queue_end_write(&conn->input, (size_t) num);
 				}
-				
-				if (!remove) {
 
-					for (;;) { /* Respond loop start */
+				while (!remove) { /* Respond loop start */
 
-						char  *src = byte_queue_start_read(&conn->input);
-						size_t len = byte_queue_used_space(&conn->input);
+					char  *src = byte_queue_start_read(&conn->input);
+					size_t len = byte_queue_used_space(&conn->input);
 
-						// Look for the \r\n\r\n
-						size_t j = 0;
-						while (j+3 < len && (src[j] != '\r' || src[j+1] != '\n' || src[j+2] != '\r' || src[j+3] != '\n'))
-							j++;
-						if (j+3 >= len)
-							break;
-						size_t head_length = j+4;
-
+					// Look for the \r\n\r\n
+					size_t j = 0;
+					while (j+3 < len && (src[j] != '\r' || src[j+1] != '\n' || src[j+2] != '\r' || src[j+3] != '\n'))
+						j++;
+					if (j+3 >= len)
+						break;
+					size_t head_length = j+4;
 #if SHOW_REQUESTS
-						print_bytes(logfile, "", src, head_length);
-						putc('\n', logfile);
+					print_bytes(logfile, "", src, head_length);
+					putc('\n', logfile);
 #endif
-						// Found! We got the request head
-						Request request;
-						int res = parse_request_head(src, head_length, &request);
-						if (res != P_OK) {
-							// Invalid HTTP request
+					// Found! We got the request head
+					Request request;
+					int res = parse_request_head(src, head_length, &request);
+					if (res != P_OK) {
+						// Invalid HTTP request
+						const char msg[] = "HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n\r\n";
+						byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+						pollarray[i].events &= ~POLLIN;
+						pollarray[i].events |= POLLOUT;
+						pollarray[i].revents |= POLLOUT;
+						conn->closing = true;
+						conn->start_time = now;
+						break;
+					}
+
+					Slice content_length_header;
+					size_t content_length;
+					if (!find_header(&request, "Content-Length", &content_length_header)) {
+
+						if (find_and_parse_transfer_encoding(&request) & T_CHUNKED) {
+							// Content-Length missing
+							const char msg[] = "HTTP/1.1 411 Length Required\r\nConnection: Close\r\n\r\n";
+							byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+							pollarray[i].events &= ~POLLIN;
+							pollarray[i].events |= POLLOUT;
+							pollarray[i].revents |= POLLOUT;
+							conn->closing = true;
+							conn->start_time = now;
+							fprintf(logfile, "Content-Length missing\n");
+							break;
+						} else
+							content_length = 0;
+
+					} else {
+						content_length = parse_content_length(content_length_header);
+						if (content_length == (size_t) -1) {
+							// Invalid Content-Length
 							const char msg[] = "HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n\r\n";
 							byte_queue_write(&conn->output, msg, sizeof(msg)-1);
 							pollarray[i].events &= ~POLLIN;
@@ -1044,81 +1146,48 @@ int main(int argc, char **argv)
 							pollarray[i].revents |= POLLOUT;
 							conn->closing = true;
 							conn->start_time = now;
+							fprintf(logfile, "Invalid Content-Length\n");
 							break;
 						}
+					}
 
-						Slice content_length_header;
-						size_t content_length;
-						if (!find_header(&request, "Content-Length", &content_length_header)) {
+					if (content_length > 1<<20) {
+						// Request too large
+						const char msg[] = "HTTP/1.1 413 Content Too Large\r\nConnection: Close\r\n\r\n";
+						byte_queue_write(&conn->output, msg, sizeof(msg)-1);
+						pollarray[i].events &= ~POLLIN;
+						pollarray[i].events |= POLLOUT;
+						pollarray[i].revents |= POLLOUT;
+						conn->closing = true;
+						conn->start_time = now;
+						fprintf(logfile, "Request too large\n");
+						break;
+					}
 
-							if (find_and_parse_transfer_encoding(&request) & T_CHUNKED) {
-								// Content-Length missing
-								const char msg[] = "HTTP/1.1 411 Length Required\r\nConnection: Close\r\n\r\n";
-								byte_queue_write(&conn->output, msg, sizeof(msg)-1);
-								pollarray[i].events &= ~POLLIN;
+					size_t request_length = head_length + content_length;
+					if (len >= request_length) {
+
+						// Reset the request timer
+						conns->start_time = now;
+
+						// Respond
+						ResponseBuilder builder;
+						response_builder_init(&builder, conn);
+						respond(request, &builder);
+						response_builder_complete(&builder);
+						if (builder.failed)
+							remove = true;
+						else {
+							conn->served_count++;
+							byte_queue_end_read(&conn->input, request_length);
+							if (byte_queue_used_space(&conn->output) > 0) {
 								pollarray[i].events |= POLLOUT;
 								pollarray[i].revents |= POLLOUT;
-								conn->closing = true;
-								conn->start_time = now;
-								fprintf(logfile, "Content-Length missing\n");
-								break;
-							} else
-								content_length = 0;
-
-						} else {
-							content_length = parse_content_length(content_length_header);
-							if (content_length == (size_t) -1) {
-								// Invalid Content-Length
-								const char msg[] = "HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n\r\n";
-								byte_queue_write(&conn->output, msg, sizeof(msg)-1);
-								pollarray[i].events &= ~POLLIN;
-								pollarray[i].events |= POLLOUT;
-								pollarray[i].revents |= POLLOUT;
-								conn->closing = true;
-								conn->start_time = now;
-								fprintf(logfile, "Invalid Content-Length\n");
-								break;
 							}
 						}
+					}
 
-						if (content_length > 1<<20) {
-							// Request too large
-							const char msg[] = "HTTP/1.1 413 Content Too Large\r\nConnection: Close\r\n\r\n";
-							byte_queue_write(&conn->output, msg, sizeof(msg)-1);
-							pollarray[i].events &= ~POLLIN;
-							pollarray[i].events |= POLLOUT;
-							pollarray[i].revents |= POLLOUT;
-							conn->closing = true;
-							conn->start_time = now;
-							fprintf(logfile, "Request too large\n");
-							break;
-						}
-
-						size_t request_length = head_length + content_length;
-						if (len >= request_length) {
-
-							// Reset the request timer
-							conns->start_time = now;
-							
-							// Respond
-							ResponseBuilder builder;
-							response_builder_init(&builder, conn);
-							respond(request, &builder);
-							response_builder_complete(&builder);
-							if (builder.failed)
-								remove = true;
-							else {
-								conn->served_count++;
-								byte_queue_end_read(&conn->input, request_length);
-								if (byte_queue_used_space(&conn->output) > 0) {
-									pollarray[i].events |= POLLOUT;
-									pollarray[i].revents |= POLLOUT;
-								}
-							}
-						}
-
-					} /* Respond loop end */
-				}
+				} /* Respond loop end */
 			} /* POLLIN */
 
 			if (!remove && (pollarray[i].revents & POLLOUT)) {
@@ -1193,6 +1262,13 @@ int main(int argc, char **argv)
 	return 0;
 }
 
+bool serve_file_or_dir(ResponseBuilder *b,
+	Slice prefix,
+	Slice docroot,
+	Slice reqpath,
+	Slice mime,
+	bool enable_dir_listing);
+
 void respond(Request request, ResponseBuilder *b)
 {
 	if (request.major != 1 || request.minor > 1) {
@@ -1206,9 +1282,380 @@ void respond(Request request, ResponseBuilder *b)
 
 	if (string_match_case_insensitive(request.path, str_to_slice("/hello"))) {
 		status_line(b, 200);
-		append_content_string(b, "Hello, world!");
+		append_content_s(b, "Hello, world!");
 		return;
 	}
 
+	if (serve_file_or_dir(b, str_to_slice("/"), str_to_slice("docroot/"), request.path, (Slice) {NULL, 0}, false))
+		return;
+
 	status_line(b, 404);
+	append_content_s(b, "Nothing here :|");
+}
+
+#define PATH_SEP '/'
+
+static bool is_print(char c)
+{
+    return c >= 32 && c < 127;
+}
+
+static bool is_pcomp(char c)
+{
+    return c != '/' && c != ':' && is_print(c);
+}
+
+int split_path_components(char *src, size_t len, Slice *stack,
+	int limit, bool allow_ddots)
+{
+    size_t cur = 0;
+
+    // Skip the first slash
+    if (cur < len && src[cur] == PATH_SEP)
+        cur++;
+
+    int depth = 0;
+    while (cur < len) {
+
+        if (depth == limit)
+            return -1;
+
+        size_t start = cur;
+        while (cur < len && (is_pcomp(src[cur]) || (allow_ddots && src[cur] == ':')))
+            cur++;
+
+        Slice comp;
+        comp.data = src + start;
+        comp.size = cur - start;
+
+        if (comp.size == 0)
+            return -1; // We consider paths with empty components invalid
+
+        if (comp.size == 2 && !memcmp(comp.data, "..", 2)) {
+            if (depth == 0)
+                return -1;
+            depth--;
+        } else {
+            if (comp.size != 1 || memcmp(comp.data, ".", 1))
+                stack[depth++] = comp;
+        }
+
+        if (cur == len)
+            break;
+
+        if (src[cur] != PATH_SEP)
+            return -1;
+        cur++;
+    }
+    return depth;
+}
+
+/*
+ * Sanitize a path string removing ./ and ../
+ * components. The final path has an initial
+ * / but not final.
+ */
+size_t sanitize_path(char *src, size_t len,
+                     char *mem, size_t max)
+{
+    #define MAX_COMPS 64
+
+    Slice stack[MAX_COMPS];
+    int depth;
+
+    depth = split_path_components(src, len, stack, MAX_COMPS, false);
+    if (depth < 0)
+        return -1;
+    
+
+    /*
+     * Count how many output bytes are required
+     */
+    size_t req = depth;
+    for (int i = 0; i < depth; i++)
+        req += stack[i].size;
+    if (req >= max)
+        return -1; // Buffer too small
+    
+    /*
+     * Copy the sanitized path into the output
+     * buffer.
+     */
+    size_t n = 0;
+    for (int i = 0; i < depth; i++) {
+        mem[n++] = PATH_SEP;
+        memcpy(mem + n, stack[i].data, stack[i].size);
+        n += stack[i].size;
+    }
+    mem[n] = '\0';
+    return n;
+}
+
+int match_path_format(Slice path, char *fmt, ...)
+{
+    #define LIMIT 32
+    Slice p_stack[LIMIT];
+    Slice f_stack[LIMIT];
+    int p_depth;
+    int f_depth;
+
+    p_depth = split_path_components(path.data, path.size,   p_stack, LIMIT, false);
+    f_depth = split_path_components(fmt,       strlen(fmt), f_stack, LIMIT, true);
+
+    if (p_depth < 0 || f_depth < 0)
+        return -1; // Error
+
+    if (p_depth != f_depth)
+        return 1; // No match
+
+    va_list args;
+    va_start(args, fmt);
+
+    for (int i = 0; i < f_depth; i++) {
+
+        assert(f_stack[i].size > 0);
+        assert(p_stack[i].size > 0);
+
+        if (f_stack[i].data[0] == ':') {
+            if (f_stack[i].size != 2)
+                return -1; // Invalid format
+            switch (f_stack[i].data[1]) {
+                
+                case 'l':
+                {
+                    Slice *sl = va_arg(args, Slice*);
+                    *sl = p_stack[i];
+                }
+                break;
+                
+                case 'n':
+                {
+                    uint32_t n = 0;
+                    size_t cur = 0;
+                    while (cur < p_stack[i].size && is_digit(p_stack[i].data[cur])) {
+                        int d = p_stack[i].data[cur] - '0';
+                        if (n > (UINT32_MAX - d) / 10)
+                            return -1; // Overflow
+                        n = n * 10 + d;
+                        cur++;
+                    }
+                    if (cur != p_stack[i].size)
+                        return -1; // Component isn't a number
+                    uint32_t *p = va_arg(args, uint32_t*);
+                    *p = n;
+                }
+                break;
+
+                default:
+                return -1; // Invalid formt
+            }
+        } else {
+            if (f_stack[i].size != p_stack[i].size)
+                return 1; // No match
+            if (memcmp(f_stack[i].data, p_stack[i].data, f_stack[i].size))
+                return false;
+        }
+    }
+
+    va_end(args);
+    return 0;
+}
+
+struct {
+	char *mime;
+	char *ext;
+} mime_table[] = {
+
+	{"text/javascript", ".js"},
+	{"text/javascript", ".javascript"},
+	{"text/html", ".html"},
+	{"text/html", ".htm"},
+
+	{"image/gif", ".gif"},
+	{"image/jpeg", ".jpg"},
+	{"image/jpeg", ".jpeg"},
+	{"image/svg+xml", ".svg"},
+
+	{"video/mp4", ".mp4"},
+	{"video/mpeg", ".mpeg"},
+
+	{"font/ttf", ".ttf"},
+	{"font/woff", ".woff"},
+	{"font/woff2", ".woff2"},
+
+	{"text/plain", ".txt"},
+
+	{"audio/wav", ".wav"},
+
+	{"application/x-7z-compressed", ".7z"},
+	{"application/zip", ".zip"},
+	{"application/xml", ".xml"},
+	{"application/json", ".json"},
+
+	{NULL, NULL},
+};
+
+Slice mimetype_from_filename(Slice name)
+{
+    size_t i = 0;
+    while (mime_table[i].ext) {
+        char  *ext = mime_table[i].ext;
+        size_t ext_len = strlen(ext);
+        char  *tail = name.data + (name.size - ext_len);
+        if (ext_len <= name.size && !memcmp(tail, ext, ext_len))
+            return str_to_slice(mime_table[i].mime);
+        i++;
+    }
+    return (Slice) {NULL, 0};
+}
+
+bool startswith(Slice prefix, Slice str)
+{
+	if (prefix.size > str.size)
+		return false;
+	return !memcmp(prefix.data, str.data, prefix.size);
+}
+
+bool serve_file_or_dir(ResponseBuilder *b,
+	Slice prefix,
+	Slice docroot,
+	Slice reqpath,
+	Slice mime,
+	bool enable_dir_listing)
+{
+/*
+	printf("prefix=[%.*s]\n", (int) prefix.size, prefix.data);
+	printf("docroot=[%.*s]\n", (int) docroot.size, docroot.data);
+	printf("reqpath=[%.*s]\n", (int) reqpath.size, reqpath.data);
+	printf("mime=[%.*s]\n", (int) mime.size, mime.data);
+	printf("\n");
+*/
+
+	// Sanitize the request path
+	char pathmem[1<<10];
+	Slice path;
+	{
+		size_t len = sanitize_path(reqpath.data, reqpath.size, pathmem, sizeof(pathmem));
+		if (len >= sizeof(pathmem)) {
+			status_line(b, 500);
+			return true;
+		}
+		path = (Slice) {pathmem, len};
+		path.data[path.size] = '\0';
+	}
+
+/*
+	printf("path=[%.*s]\n", (int) path.size, path.data);
+	printf("\n");
+*/
+
+	// Only handle this request if the prefix matches
+	if (!startswith(prefix, path))
+		return false;
+
+	// Remove the matched prefix and put the docroot in its place
+	{
+		if (docroot.size + path.size - prefix.size >= sizeof(pathmem)) {
+			status_line(b, 500);
+			return true;
+		}
+		memmove(pathmem + docroot.size, pathmem + prefix.size, path.size - prefix.size);
+		memcpy(pathmem, docroot.data, docroot.size);
+		path.size -= prefix.size;
+		path.size += docroot.size;
+		path.data[path.size] = '\0';
+	}
+
+/*
+	printf("path=[%.*s]\n", (int) path.size, path.data);
+	printf("\n");
+*/
+	struct stat buf;
+	if (stat(path.data, &buf)) {
+		if (errno == ENOENT)
+			return false;
+		status_line(b, 500);
+		return true;
+	}
+
+	if (S_ISREG(buf.st_mode)) {
+
+//		printf("Sending file\n");
+
+		int fd;
+		do
+			fd = open(path.data, O_RDONLY);
+		while (fd < 0 && errno == EINTR);
+
+		if (fd < 0) {
+			status_line(b, 500);
+			close(fd);
+			return true;
+		}
+		
+		status_line(b, 200);
+
+		if (mime.size == 0) mime = mimetype_from_filename(path);
+		if (mime.size > 0) add_header_f(b, "Content-Type: %.*s", (int) mime.size, mime.data);
+
+		char *dst = append_content_start(b, (size_t) buf.st_size);
+		if (dst == NULL) {
+			status_line(b, 500);
+			close(fd);
+			return true;
+		}
+
+		size_t copied = 0;
+		while (copied < (size_t) buf.st_size) {
+			int num = read(fd, dst + copied, (size_t) buf.st_size - copied);
+			if (num <= 0) {
+				if (num < 0)
+					fprintf(logfile, "Failed reading from '%.*s'\n", (int) path.size, path.data);
+				break;
+			}
+			copied += num;
+		}
+
+		append_content_end(b, copied);
+		close(fd);
+		return true;
+	}
+
+	if (enable_dir_listing && S_ISDIR(buf.st_mode)) {
+
+//		printf("Sending directory listing\n");
+
+		DIR *d = opendir(path.data);
+		if (d == NULL) {
+			status_line(b, 500);
+			return true;
+		}
+
+		status_line(b, 200);
+		append_content_s(b,
+			"<html>\n"
+			"    <head>\n"
+			"    </head>\n"
+			"    <body>\n"
+			"        <ul>\n"
+			"            <li><a href=\"\">(parent)</a></li>"); // TODO: Add links
+
+		struct dirent *dir;
+		while ((dir = readdir(d))) {
+			if (!strcmp(dir->d_name, ".") ||
+				!strcmp(dir->d_name, ".."))
+				continue;
+			append_content_f(b, "<li><a href=\"\">%s</a></li>\n", dir->d_name); // TODO: Add links
+		}
+
+		append_content_s(b,
+			"        </ul>\n"
+			"    </body>\n"
+			"</html>\n");
+		closedir(d);
+		return true;
+	}
+
+//	printf("Not handled\n");
+	return false;
 }

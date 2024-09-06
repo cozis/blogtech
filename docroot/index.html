@@ -1,0 +1,288 @@
+<html>
+	<head>
+		<title>Cozis</title>
+		<style>
+
+			h1, h2, h3, p, a {
+				line-height: 160%;
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+			}
+/*
+			header {
+				background-color: #c9ffcd;
+				padding: 10px;
+				border-radius: 5px;
+				margin-top: 20px;
+			}
+
+			article {
+				background-color: #eee;
+				padding: 10px;
+				border-radius: 5px;
+				margin-top: 10px;
+			}
+*/
+			div.c2h-code {
+				padding: 10px;
+				border-radius: 3px;
+
+				font-family: monospace;
+				font-size: 13px;
+
+				color: white;
+				background: hsl(210, 15%, 22%);
+			}
+
+			div.c2h-code-inner::-webkit-scrollbar {
+				width: 10px;
+				background: transparent;
+			}
+
+			div.c2h-code-inner::-webkit-scrollbar-thumb {
+				background: hsla(210, 13%, 40%, 0.7);
+			}
+
+			div.c2h-code-inner {
+
+				height: inherit;
+				max-height: inherit;
+				
+				overflow: auto;
+				scrollbar-color: hsla(210, 13%, 40%, 0.7) transparent;
+			}
+
+			div.c2h-code table {
+				border-collapse: collapse;
+				font-size: inherit;
+			}
+
+			div.c2h-code table td {
+				color: white;
+
+				/* The vertical align is nice because for lines that 
+				* are broken in more lines, this makes the line     
+				* number align to the first line.                   
+				*/
+				vertical-align: top;
+			}
+
+			div.c2h-code table td:first-child {
+				
+				/* Disabling the selection of the line numbers is 
+				* necessary to be able to only select the code.  
+				*/
+				user-select: none;
+
+				text-align: right;
+				padding: 0 10px;
+				color: hsla(210, 13%, 40%, 0.7);
+			}
+
+			div.c2h-code table td:last-child {
+				/* This field is suuper important. By default HTML   
+				* collapses sequences of whitespace into one space. 
+				* This isn't good to display code since it removed  
+				* indentation. By applying this attribute to the    
+				* second column of the table (which contains the    
+				* code), the whitespace is preserved.               
+				* NOTE: 'pre' stands for preserve.                  
+				*/
+				white-space: pre;
+			}
+
+			.c2h-comment {
+				color: hsl(221, 12%, 69%);
+			}
+
+			.c2h-val-int,
+			.c2h-val-flt {
+				color: hsl(32, 93%, 66%);
+			}
+
+			.c2h-val-str,
+			.c2h-val-char {
+				color: hsl(114, 31%, 68%);
+			}
+
+			.c2h-directive,
+			.c2h-kword {
+				color: hsl(300, 30%, 68%);
+			}
+
+			.c2h-kword-static,
+			.c2h-kword-const {
+				color: hsl(357, 79%, 65%);
+			}
+
+			.c2h-operator {
+				color: hsl(13, 93%, 66%);
+			}
+
+			.c2h-identifier {
+				color: hsl(219, 28%, 88%);
+			}
+
+			.c2h-fdeclname {
+				color: hsl(180, 36%, 54%);
+			}
+
+			.c2h-fcallname {
+				color: hsl(210, 50%, 60%);
+			}
+		</style>
+	</head>
+	<body style="width:800px;margin:auto;">
+		<h1>Cozis</h1>
+		<header>
+			<p>
+				Hello! I'm Francesco Cozzuto, a computer programmer from Italy with a strong focus on systems programming, networking, and graphics. Online I usually go by cozis.
+				<br /><br />
+				I have a deep interest in building interpreters, compilers, network stacks, and rendering engines. In the past, I've developed HTTP/1.1 servers (for Linux and Windows), scripting language interpreters, a full userspace network stack, and a physically-based renderer (PBR). My primary language is C, though I occasionally dive into C++ if necessary.
+				<br /><br />
+				Feel free to connect with me on <a href="https://www.linkedin.com/in/cozis/" target="_blank">LinkedIn</a>, check out my projects on <a href="https://github.com/cozis">GitHub</a>, or reach out via Discord (cozisx) or email at francesco.cozzuto [at] gmail.com :)
+			</p>
+		</header>
+
+		<article>
+			<h2>Projects</h2>
+
+			<table>
+				<tr>
+					<td style="vertical-align: text-top;">
+						<h3><a href="https://github.com/cozis/PBR-Demo" target="_blank">BPR Renderer</a></h3>
+						<p>
+							It's a 3D renderer I built to dive deeper into graphics programming, using as reference the great <a href="https://learnopengl.com/">LearnOpenGL</a> tutorial and <a href="https://google.github.io/filament/Filament.html">Google's Filament</a>. The renderer implements Physically Based Rendering (PBR), a technique that simulates light and shadows to closely mimic real-world behavior. It supports shadow mapping, Image-Based Lighting (IBL), and can load meshes from external files.
+						</p>
+					</td>
+					<td>
+						<a href="chessboard.jpg" target="_blank"><img width="300px" src="chessboard.jpg" /></a>
+					</td>
+				</tr>
+			</table>
+
+			<h3><a href="https://github.com/cozis/microtcp" target="_blank">MicroTCP</a></h3>
+			<p>
+				MicroTCP is a user-space network stack I developed to better understand TCP and lower-level protocols like IP, ICMP, and ARP. It provides two interfaces: a blocking, BSD socket-like interface and a non-blocking, epoll-like interface for handling multiple connections efficiently. I tested it by porting xHTTP to it, an HTTP/1.1 implementation I wrote previously. You can also check out a discussion about it on <a href="https://news.ycombinator.com/item?id=38086598">Hacker News</a>.
+			</p>
+
+			<h3><a href="https://github.com/cozis/noja" target="_blank">Noja</a></h3>
+			<p>
+				This is the first "serious" project I worked on. It's an interpreter for a high level language I designed from scratch. It taught me how to manage non-trivial codebases and how important it is to keep complexity low.
+
+				The language supports features like multiple return values, default argument values, and closures. It was a great learning experience and helped me understand interpreters deeply. You can find various examples in the examples/ folder of the GitHub repository, including an HTTP server I ported to the language.
+			</p>
+
+			<div class="c2h-code">
+				<div class="c2h-code-inner">
+				<table>
+					<tr><td>1</td><td><span class="c2h-kword">fun</span> <span class="c2h-identifier c2h-fdeclname">loadFile</span>(<span class="c2h-identifier">path</span>: <span class="c2h-identifier">String</span>) {</td></tr>
+					<tr><td>2</td><td></td></tr>
+					<tr><td>3</td><td>    <span class="c2h-comment"># Log the path</span></td></tr>
+					<tr><td>4</td><td>    <span class="c2h-identifier c2h-fcallname">print</span>(<span class="c2h-val-str">"path="</span>, <span class="c2h-identifier">path</span>, <span class="c2h-val-str">"\n"</span>);</td></tr>
+					<tr><td>5</td><td></td></tr>
+					<tr><td>6</td><td>    <span class="c2h-comment"># Open the file</span></td></tr>
+					<tr><td>7</td><td>    <span class="c2h-identifier">stream</span>, <span class="c2h-identifier">error</span> <span class="c2h-operator">=</span> <span class="c2h-identifier">files</span>.<span class="c2h-identifier c2h-fcallname">openFile</span>(<span class="c2h-identifier">path</span>, <span class="c2h-identifier">files</span>.<span class="c2h-identifier">READ</span>);</td></tr>
+					<tr><td>8</td><td>    <span class="c2h-kword c2h-kword-if">if</span> <span class="c2h-identifier">error</span> <span class="c2h-operator">!=</span> <span class="c2h-identifier">none</span>:</td></tr>
+					<tr><td>9</td><td>        <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-kword-const">none</span>, <span class="c2h-identifier">error</span>;</td></tr>
+					<tr><td>10</td><td></td></tr>
+					<tr><td>11</td><td>    <span class="c2h-comment"># Copy</span> <span class="c2h-identifier">its</span> <span class="c2h-identifier">contents</span> <span class="c2h-identifier">to</span> <span class="c2h-identifier">a</span> <span class="c2h-identifier">dinamically</span> <span class="c2h-identifier">growing</span> <span class="c2h-identifier">buffer</span></td></tr>
+					<tr><td>12</td><td>    <span class="c2h-identifier">text</span> <span class="c2h-operator">=</span> <span class="c2h-val-str">""</span>;</td></tr>
+					<tr><td>13</td><td>    <span class="c2h-identifier">size</span> <span class="c2h-operator">=</span> <span class="c2h-val-int">512</span>;</td></tr>
+					<tr><td>14</td><td>    <span class="c2h-kword c2h-kword-do">do</span> {</td></tr>
+					<tr><td>15</td><td>        <span class="c2h-identifier">size</span> <span class="c2h-operator">=</span> <span class="c2h-val-int">2</span> <span class="c2h-operator">*</span> <span class="c2h-identifier">size</span>;</td></tr>
+					<tr><td>16</td><td>        <span class="c2h-identifier">data</span> <span class="c2h-operator">=</span> <span class="c2h-identifier">buffer</span>.<span class="c2h-identifier c2h-fcallname">new</span>(<span class="c2h-identifier">size</span>);</td></tr>
+					<tr><td>17</td><td></td></tr>
+					<tr><td>18</td><td>        <span class="c2h-identifier">num_bytes</span>, <span class="c2h-identifier">error</span> <span class="c2h-operator">=</span> <span class="c2h-identifier">files</span>.<span class="c2h-identifier c2h-fcallname">read</span>(<span class="c2h-identifier">stream</span>, <span class="c2h-identifier">data</span>);</td></tr>
+					<tr><td>19</td><td>        <span class="c2h-kword c2h-kword-if">if</span> <span class="c2h-identifier">error</span> <span class="c2h-operator">!=</span> <span class="c2h-kword-const">none</span>:</td></tr>
+					<tr><td>20</td><td>            <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-kword-const">none</span>, <span class="c2h-identifier">error</span>;</td></tr>
+					<tr><td>21</td><td></td></tr>
+					<tr><td>22</td><td>        <span class="c2h-identifier">text</span> <span class="c2h-operator">=</span> <span class="c2h-identifier">string</span>.<span class="c2h-identifier c2h-fcallname">cat</span>(<span class="c2h-identifier">text</span>, <span class="c2h-identifier">buffer</span>.<span class="c2h-identifier c2h-fcallname">toString</span>(<span class="c2h-identifier">data</span>));</td></tr>
+					<tr><td>23</td><td></td></tr>
+					<tr><td>24</td><td>    } <span class="c2h-kword c2h-kword-while">while</span> <span class="c2h-identifier">num_bytes</span> <span class="c2h-operator">==</span> <span class="c2h-identifier">size</span>;</td></tr>
+					<tr><td>25</td><td></td></tr>
+					<tr><td>26</td><td>    <span class="c2h-comment"># Close the file handle</span></td></tr>
+					<tr><td>27</td><td>    <span class="c2h-identifier">files</span>.<span class="c2h-identifier c2h-fcallname">close</span>(<span class="c2h-identifier">stream</span>);</td></tr>
+					<tr><td>28</td><td></td></tr>
+					<tr><td>29</td><td>    <span class="c2h-comment"># Return the file contents to the caller</span></td></tr>
+					<tr><td>30</td><td>    <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-identifier">text</span>;</td></tr>
+					<tr><td>31</td><td>}</td></tr>
+				</table>
+				</div>
+			</div>
+
+			<h3><a href="https://github.com/cozis/xHTTP">xHTTP</a></h3>
+			<p>
+				This was my first attempt at writing an HTTP server, and pretty much got me into network programming. It's an HTTP/1.1 server for Linux designed to be extremely lightweight and fast. It leverages all of the cool Linux-specific system calls like sendfile and epoll. These days I'm more interested in cross-platform code and non-blocking interfaces, so I would change the interface a bit.
+				
+				<br />
+				<br />
+				
+				Here's how an application using xHTTP looks like:
+			</p>
+			<div class="c2h-code">
+				<div class="c2h-code-inner">
+				<table>
+					<tr><td>1</td><td><span class="c2h-directive">#include</span> <span class="c2h-val-str">&lt;string.h&gt;</span></td></tr>
+					<tr><td>2</td><td><span class="c2h-directive">#include</span> <span class="c2h-val-str">"xhttp.h"</span></td></tr>
+					<tr><td>3</td><td></td></tr>
+					<tr><td>4</td><td><span class="c2h-kword c2h-kword-static">static</span> <span class="c2h-kword c2h-kword-void">void</span> <span class="c2h-identifier c2h-fdeclname">callback</span>(<span class="c2h-identifier">xh_request</span> <span class="c2h-operator">*</span><span class="c2h-identifier">req</span>, <span class="c2h-identifier">xh_response</span> <span class="c2h-operator">*</span><span class="c2h-identifier">res</span>, <span class="c2h-kword c2h-kword-void">void</span> <span class="c2h-operator">*</span><span class="c2h-identifier">userp</span>)</td></tr>
+					<tr><td>5</td><td>{</td></tr>
+					<tr><td>6</td><td>    <span class="c2h-identifier">res</span><span class="c2h-operator">-&gt;</span><span class="c2h-identifier">status</span> <span class="c2h-operator">=</span> <span class="c2h-val-int">200</span>;</td></tr>
+					<tr><td>7</td><td>    <span class="c2h-kword c2h-kword-if">if</span>(<span class="c2h-operator">!</span><span class="c2h-identifier c2h-fcallname">strcmp</span>(<span class="c2h-identifier">req</span><span class="c2h-operator">-&gt;</span><span class="c2h-identifier">URL</span>.<span class="c2h-identifier">str</span>, <span class="c2h-val-str">"/file"</span>))</td></tr>
+					<tr><td>8</td><td>        <span class="c2h-identifier">res</span><span class="c2h-operator">-&gt;</span><span class="c2h-identifier">file</span> <span class="c2h-operator">=</span> <span class="c2h-val-str">"index.html"</span>; <span class="c2h-comment">// Send a static file</span></td></tr>
+					<tr><td>9</td><td>    <span class="c2h-kword c2h-kword-else">else</span></td></tr>
+					<tr><td>10</td><td>        <span class="c2h-identifier">res</span><span class="c2h-operator">-&gt;</span><span class="c2h-identifier">body</span>.<span class="c2h-identifier">str</span> <span class="c2h-operator">=</span> <span class="c2h-val-str">"Hello, world!"</span>; <span class="c2h-comment">// Send a string</span></td></tr>
+					<tr><td>11</td><td>    <span class="c2h-identifier c2h-fcallname">xh_header_add</span>(<span class="c2h-identifier">res</span>, <span class="c2h-val-str">"Content-Type"</span>, <span class="c2h-val-str">"text/plain"</span>);</td></tr>
+					<tr><td>12</td><td>}</td></tr>
+					<tr><td>13</td><td></td></tr>
+					<tr><td>14</td><td><span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier c2h-fdeclname">main</span>()</td></tr>
+					<tr><td>15</td><td>{</td></tr>
+					<tr><td>16</td><td>    <span class="c2h-identifier c2h-fcallname">xhttp</span>(<span class="c2h-identifier">NULL</span>, <span class="c2h-val-int">8080</span>, <span class="c2h-identifier">callback</span>, <span class="c2h-identifier">NULL</span>, <span class="c2h-identifier">NULL</span>, <span class="c2h-identifier">NULL</span>);</td></tr>
+					<tr><td>17</td><td>    <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-val-int">0</span>;</td></tr>
+					<tr><td>18</td><td>}</td></tr>
+				</table>
+				</div>
+			</div>
+
+			<h3>Minor stuff</h3>
+			<table>
+				<tr>
+					<td>
+						<a href="https://github.com/cozis/c2html">c2html</a>
+					</td>
+					<td>
+						<p>Tool to add HTML syntax highlighting to C code snippets</p>
+					</td>
+				</tr>
+				<tr>
+					<td>
+						<a href="https://github.com/cozis/tinytemplate">TinyTemplate</a>
+					</td>
+					<td>
+						<p>Templating engine in C</p>
+					</td>
+				</tr>
+				<tr>
+					<td><a href="https://github.com/cozis/buddy">Buddy Allocator</a></td>
+					<td>
+						<p>General-purpose allocator for memory constrained environments</p>
+					</td>
+				</tr>
+				<tr>
+					<td><a href="https://github.com/cozis/tinyio">TinyIO</a></td>
+					<td>
+						<p>Cross-platform interface for the various OS-specific event loop APIs (I/O completion ports on Windows and io_uring on Linux)</p>
+					</td>
+				</tr>
+				<tr>
+					<td>
+						<a href="https://github.com/cozis/gap_buffer.c">gap_buffer.c</a>
+					</td>
+					<td>
+						<p>Gap buffer implementation, a data structure used in text editors</p>
+					</td>
+				</tr>
+			</table>
+		</article>
+	</body>
+</html>
