@@ -1007,11 +1007,11 @@ int main(int argc, char **argv)
 					if (errno == EAGAIN || errno == EWOULDBLOCK)
 						break;
 					fperror(logfile, "accept");
-					return -1;
+					break;
 				}
 				if (!set_blocking(accepted_fd, false)) {
 					fperror(logfile, "fcntl");
-					return -1;
+					continue;
 				}
 
 				pollarray[free_index].fd = accepted_fd;
@@ -1210,7 +1210,8 @@ int main(int argc, char **argv)
 						if (errno == EAGAIN || errno == EWOULDBLOCK)
 							break;
 						fperror(logfile, "send");
-						return -1;
+						remove = true;
+						break;
 					}
 
 #if SHOW_IO
