@@ -17,29 +17,44 @@
 #include <poll.h>
 #include <time.h>
 
-#define SHOW_IO 1
-#define SHOW_REQUESTS 0
+#define SHOW_IO 0
+#define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
 #define CONNECTION_TIMEOUT_SEC 60
+#define LOG_BUFFER_SIZE (1<<20)
+#define LOG_BUFFER_LIMIT (1<<24)
+#define LOG_FLUSH_TIMEOUT_SEC 3
+
+static_assert(LOG_BUFFER_SIZE < LOG_BUFFER_LIMIT, "");
+
+void log_init(void);
+void log_free(void);
+void log_data(const char *str, size_t len);
+void log_fatal(const char *str);
+void log_string(const char *str);
+void log_perror(const char *str);
+void log_format(const char *fmt, ...);
+void log_flush(void);
+bool log_empty(void);
 
 uint64_t get_current_time_ms(void)
 {
 	struct timespec ts;
 	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
 	if (ret) {
-		printf("Couldn't read time\n");
+		log_fatal("Couldn't read time\n");
 		abort();
 	}
 	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000) {
-		printf("Time overflow\n");
+		log_fatal("Time overflow\n");
 		abort();
 	}
 	uint64_t ms = ts.tv_sec * 1000;
 
 	uint64_t nsec_part = ts.tv_nsec / 1000000;
 	if (ms > UINT64_MAX - nsec_part) {
-		printf("Time overflow\n");
+		log_fatal("Time overflow\n");
 		abort();
 	}
 	ms += nsec_part;
@@ -629,7 +644,7 @@ static bool set_blocking(int fd, bool blocking)
 	return true;
 }
 
-void print_bytes(FILE *stream, const char *prefix, const char *str, size_t len)
+void print_bytes(const char *prefix, const char *str, size_t len)
 {
 	bool line_start = true;
 
@@ -642,17 +657,17 @@ void print_bytes(FILE *stream, const char *prefix, const char *str, size_t len)
 		size_t substr_length = i - substr_offset;
 
 		if (line_start) {
-			fprintf(stream, "%s", prefix);
+			log_string(prefix);
 			line_start = false;
 		}
 
-		fwrite(str + substr_offset, 1, substr_length, stream);
+		log_data(str + substr_offset, substr_length);
 
 		if (i < len) {
 			if (str[i] == '\r')
-				fprintf(stream, "\\r");
+				log_string("\\r");
 			else {
-				fprintf(stream, "\\n\n");
+				log_string("\\n\n");
 				line_start = true;
 			}
 			i++;
@@ -660,7 +675,7 @@ void print_bytes(FILE *stream, const char *prefix, const char *str, size_t len)
 	}
 
 	if (!line_start)
-		putc('\n', stream);
+		log_string("\n");
 }
 
 typedef struct {
@@ -701,7 +716,7 @@ void response_builder_init(ResponseBuilder *b, Connection *conn)
 void status_line(ResponseBuilder *b, int status)
 {
 	if (b->state != R_STATUS) {
-		printf("Appending status line twice\n");
+		log_fatal("Appending status line twice\n");
 		abort();
 	}
 	if (!b->failed) {
@@ -718,9 +733,9 @@ void add_header(ResponseBuilder *b, const char *header)
 {
 	if (b->state != R_HEADER) {
 		if (b->state == R_STATUS)
-			printf("Didn't write status line before headers\n");
+			log_fatal("Didn't write status line before headers\n");
 		else
-			printf("Can't add headers after content\n");
+			log_fatal("Can't add headers after content\n");
 		abort();
 	}
 	if (b->failed)
@@ -780,7 +795,7 @@ void append_content_s(ResponseBuilder *b, const char *str)
 		b->state = R_CONTENT;
 	}
 	if (b->state != R_CONTENT) {
-		printf("Invalid response builder state\n");
+		log_fatal("Invalid response builder state\n");
 		abort();
 	}
 	if (b->failed)
@@ -799,7 +814,7 @@ char *append_content_start(ResponseBuilder *b, size_t cap)
 		b->state = R_CONTENT;
 	}
 	if (b->state != R_CONTENT) {
-		printf("Invalid response builder state\n");
+		log_fatal("Invalid response builder state\n");
 		abort();
 	}
 	if (b->failed)
@@ -857,7 +872,7 @@ void response_builder_complete(ResponseBuilder *b)
 		if (b->failed) return;
 	} else {
 		if (b->state != R_CONTENT) {
-			printf("Invalid response builder state\n");
+			log_fatal("Invalid response builder state\n");
 			abort();
 		}
 	}
@@ -910,13 +925,6 @@ uint64_t deadline_of(Connection *conn)
 	return conn->start_time + (conn->closing ? CLOSING_TIMEOUT_SEC : REQUEST_TIMEOUT_SEC) * 1000;
 }
 
-FILE *logfile;
-
-void fperror(FILE *stream, const char *str)
-{
-	fprintf(stream, "%s: %s\n", str, strerror(errno));
-}
-
 bool stop = false;
 
 void handle_sigterm(int signum) 
@@ -942,16 +950,17 @@ int main(int argc, char **argv)
 	signal(SIGQUIT, handle_sigterm);
 	signal(SIGINT,  handle_sigterm);
 
-	logfile = fopen("log.txt", "ab");
+	log_init();
+	log_string("starting\n");
 
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
-		fperror(logfile, "socket");
+		log_perror("socket");
 		return -1;
 	}
 
 	if (!set_blocking(listen_fd, false)) {
-		fperror(logfile, "fcntl");
+		log_perror("fcntl");
 		return -1;
 	}
 
@@ -963,17 +972,19 @@ int main(int argc, char **argv)
 	addr.sin_port = htons(8080);
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
-		fperror(logfile, "bind");
+		log_perror("bind");
 		return -1;
 	}
 
 	if (listen(listen_fd, 32)) {
-		fperror(logfile, "listen");
+		log_perror("listen");
 		return -1;
 	}
 
 	pollarray[0].fd = listen_fd;
 	pollarray[0].events = POLLIN;
+
+	uint64_t last_log_time = 0;
 
 	int timeout = -1;
 	while (!stop) {
@@ -982,7 +993,7 @@ int main(int argc, char **argv)
 		if (ret < 0) {
 			if (errno == EINTR)
 				break;
-			fperror(logfile, "poll");
+			log_perror("poll");
 			return -1;
 		}
 
@@ -1006,11 +1017,11 @@ int main(int argc, char **argv)
 						continue;
 					if (errno == EAGAIN || errno == EWOULDBLOCK)
 						break;
-					fperror(logfile, "accept");
+					log_perror("accept");
 					break;
 				}
 				if (!set_blocking(accepted_fd, false)) {
-					fperror(logfile, "fcntl");
+					log_perror("fcntl");
 					continue;
 				}
 
@@ -1042,7 +1053,7 @@ int main(int argc, char **argv)
 				if (conn->closing) {
 					// Closing timeout
 					remove = true;
-					fprintf(logfile, "Closing timeout\n");
+					log_string("Closing timeout\n");
 				} else {
 					// Request timeout
 					const char msg[] = "HTTP/1.1 408 Request Timeout\r\nConnection: Close\r\n\r\n";
@@ -1052,7 +1063,7 @@ int main(int argc, char **argv)
 					pollarray[i].events &= ~POLLIN;
 					pollarray[i].events |= POLLOUT;
 					pollarray[i].revents |= POLLOUT;
-					fprintf(logfile, "Request timeout\n");
+					log_string("Request timeout\n");
 				}
 
 			} else if (!remove && (pollarray[i].revents & POLLIN)) {
@@ -1081,7 +1092,7 @@ int main(int argc, char **argv)
 						break;
 					}
 #if SHOW_IO
-					print_bytes(logfile, "> ", dst, num);
+					print_bytes("> ", dst, num);
 #endif
 					byte_queue_end_write(&conn->input, (size_t) num);
 				}
@@ -1099,8 +1110,8 @@ int main(int argc, char **argv)
 						break;
 					size_t head_length = j+4;
 #if SHOW_REQUESTS
-					print_bytes(logfile, "", src, head_length);
-					putc('\n', logfile);
+					print_bytes("", src, head_length);
+					log_string("\n");
 #endif
 					// Found! We got the request head
 					Request request;
@@ -1130,7 +1141,7 @@ int main(int argc, char **argv)
 							pollarray[i].revents |= POLLOUT;
 							conn->closing = true;
 							conn->start_time = now;
-							fprintf(logfile, "Content-Length missing\n");
+							log_string("Content-Length missing\n");
 							break;
 						} else
 							content_length = 0;
@@ -1146,7 +1157,7 @@ int main(int argc, char **argv)
 							pollarray[i].revents |= POLLOUT;
 							conn->closing = true;
 							conn->start_time = now;
-							fprintf(logfile, "Invalid Content-Length\n");
+							log_string("Invalid Content-Length\n");
 							break;
 						}
 					}
@@ -1160,7 +1171,7 @@ int main(int argc, char **argv)
 						pollarray[i].revents |= POLLOUT;
 						conn->closing = true;
 						conn->start_time = now;
-						fprintf(logfile, "Request too large\n");
+						log_string("Request too large\n");
 						break;
 					}
 
@@ -1209,13 +1220,13 @@ int main(int argc, char **argv)
 							continue;
 						if (errno == EAGAIN || errno == EWOULDBLOCK)
 							break;
-						fperror(logfile, "send");
+						log_perror("send");
 						remove = true;
 						break;
 					}
 
 #if SHOW_IO
-					print_bytes(logfile, "< ", src, num);
+					print_bytes("< ", src, num);
 #endif
 					byte_queue_end_read(&conn->output, (size_t) num);
 				}
@@ -1238,14 +1249,28 @@ int main(int argc, char **argv)
 			}
 		}
 
+		if (now - last_log_time > LOG_FLUSH_TIMEOUT_SEC * 1000) {
+			printf("flushing\n");
+			log_flush();
+			last_log_time = now;
+		}
+
 		/*
 		 * Calculate the timeout for the next poll
 		 */
-		if (oldest == NULL)
-			timeout = -1;
-		else {
-			if (deadline_of(oldest) < now) timeout = 0;
-			else timeout = deadline_of(oldest) - now;
+		if (log_empty()) {
+			if (oldest == NULL)
+				timeout = -1;
+			else {
+				if (deadline_of(oldest) < now) timeout = 0;
+				else timeout = deadline_of(oldest) - now;
+			}
+		} else {
+			uint64_t deadline = last_log_time + LOG_FLUSH_TIMEOUT_SEC * 1000;
+			if (oldest && deadline > deadline_of(oldest))
+				deadline = deadline_of(oldest);
+			if (deadline < now) timeout = 0;
+			else timeout = deadline - now;
 		}
 
 	} /* main loop end */
@@ -1257,9 +1282,10 @@ int main(int argc, char **argv)
 		byte_queue_free(&conns[i].input);
 		byte_queue_free(&conns[i].output);
 	}
-	fprintf(logfile, "closing\n");
+	log_string("closing\n");
+
 	close(listen_fd);
-	fclose(logfile);
+	log_free();
 	return 0;
 }
 
@@ -1611,7 +1637,7 @@ bool serve_file_or_dir(ResponseBuilder *b,
 			int num = read(fd, dst + copied, (size_t) buf.st_size - copied);
 			if (num <= 0) {
 				if (num < 0)
-					fprintf(logfile, "Failed reading from '%.*s'\n", (int) path.size, path.data);
+					log_format("Failed reading from '%.*s'\n", (int) path.size, path.data);
 				break;
 			}
 			copied += num;
@@ -1659,4 +1685,168 @@ bool serve_file_or_dir(ResponseBuilder *b,
 
 //	printf("Not handled\n");
 	return false;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+int      log_last_file_index = 0;
+int      log_fd = -1;
+char    *log_buffer = NULL;
+size_t   log_buffer_used = 0;
+
+void log_choose_file_name(char *dst, size_t max)
+{
+	for (;;) {
+
+		int num = snprintf(dst, max, "logs/log_%d.txt", log_last_file_index);
+		if (num < 0 || (size_t) num >= max)
+			abort();
+		dst[num] = '\0';
+
+		struct stat buf;
+		if (stat(dst, &buf) && errno == ENOENT)
+			break;
+
+		if (log_last_file_index == 100000000)
+			abort();
+		log_last_file_index++;
+	}
+}
+
+void log_init(void)
+{
+	log_buffer = mymalloc(LOG_BUFFER_SIZE);
+	if (log_buffer == NULL)
+		abort();
+
+	char name[1<<12];
+	log_choose_file_name(name, sizeof(name));
+	log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
+	if (log_fd < 0)
+		abort();
+}
+
+void log_free(void)
+{
+	log_flush();
+	close(log_fd);
+	free(log_buffer);
+	log_fd = -1;
+	log_buffer = NULL;
+	log_buffer_used = 0;
+}
+
+bool log_empty(void)
+{
+	return log_buffer_used == 0;
+}
+
+void log_flush(void)
+{
+	if (log_buffer_used == 0)
+		return;
+
+	/*
+	 * Rotate the file if the limit was reached
+	 */
+	struct stat buf;
+	if (fstat(log_fd, &buf))
+		abort();
+	if (buf.st_size + log_buffer_used >= LOG_BUFFER_LIMIT) {
+		char name[1<<12];
+		log_choose_file_name(name, sizeof(name));
+		
+		close(log_fd);
+		log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		if (log_fd < 0)
+			abort();
+	}
+
+	/*
+	 * Buffer is full. We need to flush it to continue
+	 */
+	int zeros = 0;
+	size_t copied = 0;
+	while (copied < log_buffer_used) {
+		int num = write(log_fd, log_buffer + copied, log_buffer_used - copied);
+		if (num < 0) {
+			if (errno == EINTR)
+				continue;
+			abort();
+		}
+		if (num == 0) {
+			zeros++;
+			if (zeros == 1000)
+				abort();
+		} else {
+			zeros = 0;
+		}
+
+		copied += num;
+	}
+
+	assert(copied == log_buffer_used);
+	log_buffer_used = 0;
+}
+
+void log_string(const char *str)
+{
+	log_data(str, str ? strlen(str) : 0);
+}
+
+void log_fatal(const char *str)
+{
+	log_string(str);
+	log_free();
+	abort();
+}
+
+void log_format(const char *fmt, ...)
+{
+	if (log_buffer_used == LOG_BUFFER_SIZE)
+		log_flush();
+
+	int num;
+	{
+		va_list args;
+		va_start(args, fmt);
+		num = vsnprintf(log_buffer + log_buffer_used, LOG_BUFFER_SIZE - log_buffer_used, fmt, args);
+		va_end(args);
+	}
+
+	if (num < 0 || num > LOG_BUFFER_SIZE)
+		abort();
+
+	if ((size_t) num > LOG_BUFFER_SIZE - log_buffer_used) {
+		log_flush();
+
+		va_list args;
+		va_start(args, fmt);
+		int k = vsnprintf(log_buffer + log_buffer_used, LOG_BUFFER_SIZE - log_buffer_used, fmt, args);
+		va_end(args);
+
+		if (k != num) abort();
+	}
+
+	log_buffer_used += num;
+}
+
+void log_data(const char *str, size_t len)
+{
+	if (len > LOG_BUFFER_SIZE - log_buffer_used) {
+		if (len > LOG_BUFFER_SIZE)
+			abort();
+		log_flush();
+	}
+	assert(len <= LOG_BUFFER_SIZE - log_buffer_used);
+
+	memcpy(log_buffer + log_buffer_used, str, len);
+	log_buffer_used += len;
+}
+
+void log_perror(const char *str)
+{
+	log_format("%s: %s\n", str, strerror(errno));
 }
