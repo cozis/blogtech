@@ -1250,7 +1250,6 @@ int main(int argc, char **argv)
 		}
 
 		if (now - last_log_time > LOG_FLUSH_TIMEOUT_SEC * 1000) {
-			printf("flushing\n");
 			log_flush();
 			last_log_time = now;
 		}
