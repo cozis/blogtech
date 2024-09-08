@@ -27,6 +27,7 @@
 #define LOG_BUFFER_LIMIT (1<<24)
 #define LOG_FLUSH_TIMEOUT_SEC 3
 #define LOG_DIRECTORY_SIZE_LIMIT_MB 1
+#define INPUT_BUFFER_LIMIT_MB 1
 
 static_assert(LOG_BUFFER_SIZE < LOG_BUFFER_LIMIT, "");
 
@@ -1097,6 +1098,12 @@ int main(int argc, char **argv)
 					print_bytes("> ", dst, num);
 #endif
 					byte_queue_end_write(&conn->input, (size_t) num);
+
+					// Input buffer can't go over 20Mb
+					if (byte_queue_used_space(&conn->input) > (size_t) INPUT_BUFFER_LIMIT_MB * 1024 * 1024) {
+						remove = true;
+						break;
+					}
 				}
 
 				int pipeline_count = 0;
