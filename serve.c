@@ -1099,6 +1099,7 @@ int main(int argc, char **argv)
 					byte_queue_end_write(&conn->input, (size_t) num);
 				}
 
+				int pipeline_count = 0;
 				while (!remove) { /* Respond loop start */
 
 					char  *src = byte_queue_start_read(&conn->input);
@@ -1178,25 +1179,32 @@ int main(int argc, char **argv)
 					}
 
 					size_t request_length = head_length + content_length;
-					if (len >= request_length) {
+					if (len < request_length)
+						break; // Request wasn't completely received yet
 
-						// Reset the request timer
-						conns->start_time = now;
+					// Reset the request timer
+					conns->start_time = now;
 
-						// Respond
-						ResponseBuilder builder;
-						response_builder_init(&builder, conn);
-						respond(request, &builder);
-						response_builder_complete(&builder);
-						if (builder.failed)
+					// Respond
+					ResponseBuilder builder;
+					response_builder_init(&builder, conn);
+					respond(request, &builder);
+					response_builder_complete(&builder);
+					if (builder.failed)
+						remove = true;
+					else {
+						conn->served_count++;
+						byte_queue_end_read(&conn->input, request_length);
+						if (byte_queue_used_space(&conn->output) > 0) {
+							pollarray[i].events |= POLLOUT;
+							pollarray[i].revents |= POLLOUT;
+						}
+
+						pipeline_count++;
+						if (pipeline_count == 10) {
+							// TODO: We should send a response to the client instead of dropping it
 							remove = true;
-						else {
-							conn->served_count++;
-							byte_queue_end_read(&conn->input, request_length);
-							if (byte_queue_used_space(&conn->output) > 0) {
-								pollarray[i].events |= POLLOUT;
-								pollarray[i].revents |= POLLOUT;
-							}
+							break;
 						}
 					}
 
