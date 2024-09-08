@@ -17,6 +17,7 @@
 #include <poll.h>
 #include <time.h>
 
+#define PORT 8080
 #define SHOW_IO 0
 #define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC 5
@@ -25,6 +26,7 @@
 #define LOG_BUFFER_SIZE (1<<20)
 #define LOG_BUFFER_LIMIT (1<<24)
 #define LOG_FLUSH_TIMEOUT_SEC 3
+#define LOG_DIRECTORY_SIZE_LIMIT_MB 1
 
 static_assert(LOG_BUFFER_SIZE < LOG_BUFFER_LIMIT, "");
 
@@ -935,6 +937,13 @@ void handle_sigterm(int signum)
 
 int main(int argc, char **argv)
 {
+	signal(SIGTERM, handle_sigterm);
+	signal(SIGQUIT, handle_sigterm);
+	signal(SIGINT,  handle_sigterm);
+
+	log_init();
+	log_string("starting\n");
+
 	for (int i = 0; i < MAX_CONNECTIONS+1; i++) {
 		pollarray[i].fd = -1;
 		pollarray[i].events = 0;
@@ -945,13 +954,6 @@ int main(int argc, char **argv)
 		byte_queue_init(&conns[i].input);
 		byte_queue_init(&conns[i].output);
 	}
-
-	signal(SIGTERM, handle_sigterm);
-	signal(SIGQUIT, handle_sigterm);
-	signal(SIGINT,  handle_sigterm);
-
-	log_init();
-	log_string("starting\n");
 
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
@@ -969,7 +971,7 @@ int main(int argc, char **argv)
 
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons(8080);
+	addr.sin_port = htons(PORT);
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
 		log_perror("bind");
@@ -1550,11 +1552,11 @@ bool serve_file_or_dir(ResponseBuilder *b,
 	bool enable_dir_listing)
 {
 /*
-	printf("prefix=[%.*s]\n", (int) prefix.size, prefix.data);
-	printf("docroot=[%.*s]\n", (int) docroot.size, docroot.data);
-	printf("reqpath=[%.*s]\n", (int) reqpath.size, reqpath.data);
-	printf("mime=[%.*s]\n", (int) mime.size, mime.data);
-	printf("\n");
+	fprintf(stderr, "prefix=[%.*s]\n", (int) prefix.size, prefix.data);
+	fprintf(stderr, "docroot=[%.*s]\n", (int) docroot.size, docroot.data);
+	fprintf(stderr, "reqpath=[%.*s]\n", (int) reqpath.size, reqpath.data);
+	fprintf(stderr, "mime=[%.*s]\n", (int) mime.size, mime.data);
+	fprintf(stderr, "\n");
 */
 
 	// Sanitize the request path
@@ -1571,8 +1573,8 @@ bool serve_file_or_dir(ResponseBuilder *b,
 	}
 
 /*
-	printf("path=[%.*s]\n", (int) path.size, path.data);
-	printf("\n");
+	fprintf(stderr, "path=[%.*s]\n", (int) path.size, path.data);
+	fprintf(stderr, "\n");
 */
 
 	// Only handle this request if the prefix matches
@@ -1593,8 +1595,8 @@ bool serve_file_or_dir(ResponseBuilder *b,
 	}
 
 /*
-	printf("path=[%.*s]\n", (int) path.size, path.data);
-	printf("\n");
+	fprintf(stderr, "path=[%.*s]\n", (int) path.size, path.data);
+	fprintf(stderr, "\n");
 */
 	struct stat buf;
 	if (stat(path.data, &buf)) {
@@ -1606,7 +1608,7 @@ bool serve_file_or_dir(ResponseBuilder *b,
 
 	if (S_ISREG(buf.st_mode)) {
 
-//		printf("Sending file\n");
+//		fprintf(stderr, "Sending file\n");
 
 		int fd;
 		do
@@ -1649,7 +1651,7 @@ bool serve_file_or_dir(ResponseBuilder *b,
 
 	if (enable_dir_listing && S_ISDIR(buf.st_mode)) {
 
-//		printf("Sending directory listing\n");
+//		fprintf(stderr, "Sending directory listing\n");
 
 		DIR *d = opendir(path.data);
 		if (d == NULL) {
@@ -1682,7 +1684,7 @@ bool serve_file_or_dir(ResponseBuilder *b,
 		return true;
 	}
 
-//	printf("Not handled\n");
+//	fprintf(stderr, "Not handled\n");
 	return false;
 }
 
@@ -1694,22 +1696,30 @@ int      log_last_file_index = 0;
 int      log_fd = -1;
 char    *log_buffer = NULL;
 size_t   log_buffer_used = 0;
+bool     log_failed = false;
+size_t   log_total_size = 0;
 
 void log_choose_file_name(char *dst, size_t max)
 {
 	for (;;) {
 
 		int num = snprintf(dst, max, "logs/log_%d.txt", log_last_file_index);
-		if (num < 0 || (size_t) num >= max)
-			abort();
+		if (num < 0 || (size_t) num >= max) {
+			fprintf(stderr, "log_failed\n");
+			log_failed = true;
+			return;
+		}
 		dst[num] = '\0';
 
 		struct stat buf;
 		if (stat(dst, &buf) && errno == ENOENT)
 			break;
 
-		if (log_last_file_index == 100000000)
-			abort();
+		if (log_last_file_index == 100000000) {
+			fprintf(stderr, "log_failed\n");
+			log_failed = true;
+			return;
+		}
 		log_last_file_index++;
 	}
 }
@@ -1717,50 +1727,105 @@ void log_choose_file_name(char *dst, size_t max)
 void log_init(void)
 {
 	log_buffer = mymalloc(LOG_BUFFER_SIZE);
-	if (log_buffer == NULL)
-		abort();
+	if (log_buffer == NULL) {
+		fprintf(stderr, "log_failed\n");
+		log_failed = true;
+		return;
+	}
 
 	char name[1<<12];
 	log_choose_file_name(name, sizeof(name));
+	if (log_failed) {
+		return;
+	}
+
 	log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
-	if (log_fd < 0)
-		abort();
+	if (log_fd < 0) {
+		fprintf(stderr, "log_failed\n");
+		log_failed = true;
+		return;
+	}
+
+	log_total_size = 0;
+
+	DIR *d = opendir("logs");
+	if (d == NULL) {
+		fprintf(stderr, "log_failed\n");
+		log_failed = true;
+		return;
+	}
+	struct dirent *dir;
+	while ((dir = readdir(d))) {
+
+		if (!strcmp(dir->d_name, ".") ||
+			!strcmp(dir->d_name, ".."))
+			continue;
+
+		char path[1<<12];
+		int k = snprintf(path, SIZEOF(path), "logs/%s", dir->d_name);
+		if (k < 0 || k >= SIZEOF(path)) abort();
+		path[k] = '\0';
+
+		struct stat buf;
+		if (stat(path, &buf))
+			abort();
+
+		if ((size_t) buf.st_size > SIZE_MAX - log_total_size)
+			abort();
+		log_total_size += (size_t) buf.st_size;
+	}
+	closedir(d);
+
+	static_assert(SIZEOF(size_t) > 4);
+	if (log_total_size > (size_t) LOG_DIRECTORY_SIZE_LIMIT_MB * 1024 * 1024) {
+		fprintf(stderr, "Log reached disk limit at startup\n");
+		log_failed = true;
+		return;
+	}
 }
 
 void log_free(void)
 {
 	log_flush();
-	close(log_fd);
+	if (log_fd >= 0) close(log_fd);
 	free(log_buffer);
 	log_fd = -1;
 	log_buffer = NULL;
 	log_buffer_used = 0;
+	log_failed = false;
 }
 
 bool log_empty(void)
 {
-	return log_buffer_used == 0;
+	return log_failed || log_buffer_used == 0;
 }
 
 void log_flush(void)
 {
-	if (log_buffer_used == 0)
+	if (log_failed || log_buffer_used == 0)
 		return;
 
 	/*
 	 * Rotate the file if the limit was reached
 	 */
 	struct stat buf;
-	if (fstat(log_fd, &buf))
-		abort();
+	if (fstat(log_fd, &buf)) {
+		fprintf(stderr, "log_failed\n");
+		log_failed = true;
+		return;
+	}
 	if (buf.st_size + log_buffer_used >= LOG_BUFFER_LIMIT) {
 		char name[1<<12];
-		log_choose_file_name(name, sizeof(name));
+		log_choose_file_name(name, SIZEOF(name));
+		if (log_failed) return; 
 		
 		close(log_fd);
 		log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
-		if (log_fd < 0)
-			abort();
+		if (log_fd < 0) {
+			fprintf(stderr, "log_failed\n");
+			log_failed = true;
+			return;
+		}
 	}
 
 	/*
@@ -1769,21 +1834,34 @@ void log_flush(void)
 	int zeros = 0;
 	size_t copied = 0;
 	while (copied < log_buffer_used) {
+
 		int num = write(log_fd, log_buffer + copied, log_buffer_used - copied);
 		if (num < 0) {
 			if (errno == EINTR)
 				continue;
-			abort();
+			fprintf(stderr, "log_failed\n");
+			log_failed = true;
+			return;
 		}
 		if (num == 0) {
 			zeros++;
-			if (zeros == 1000)
-				abort();
+			if (zeros == 1000) {
+				fprintf(stderr, "log_failed\n");
+				log_failed = true;
+				return;
+			}
 		} else {
 			zeros = 0;
 		}
 
 		copied += num;
+		log_total_size += num;
+
+		if (log_total_size > (size_t) LOG_DIRECTORY_SIZE_LIMIT_MB * 1024 * 1024) {
+			fprintf(stderr, "Log reached disk limit\n");
+			log_failed = true;
+			return;
+		}
 	}
 
 	assert(copied == log_buffer_used);
@@ -1804,8 +1882,13 @@ void log_fatal(const char *str)
 
 void log_format(const char *fmt, ...)
 {
-	if (log_buffer_used == LOG_BUFFER_SIZE)
+	if (log_failed)
+		return;
+
+	if (log_buffer_used == LOG_BUFFER_SIZE) {
 		log_flush();
+		if (log_failed) return;
+	}
 
 	int num;
 	{
@@ -1815,11 +1898,15 @@ void log_format(const char *fmt, ...)
 		va_end(args);
 	}
 
-	if (num < 0 || num > LOG_BUFFER_SIZE)
-		abort();
+	if (num < 0 || num > LOG_BUFFER_SIZE) {
+		log_failed = true;
+		return;
+	}
 
 	if ((size_t) num > LOG_BUFFER_SIZE - log_buffer_used) {
+		
 		log_flush();
+		if (log_failed) return;
 
 		va_list args;
 		va_start(args, fmt);
@@ -1834,10 +1921,16 @@ void log_format(const char *fmt, ...)
 
 void log_data(const char *str, size_t len)
 {
+	if (log_failed)
+		return;
+
 	if (len > LOG_BUFFER_SIZE - log_buffer_used) {
-		if (len > LOG_BUFFER_SIZE)
-			abort();
+		if (len > LOG_BUFFER_SIZE) {
+			log_failed = true;
+			return;
+		}
 		log_flush();
+		if (log_failed) return;
 	}
 	assert(len <= LOG_BUFFER_SIZE - log_buffer_used);
 
