@@ -1316,6 +1316,7 @@ void respond(Request request, ResponseBuilder *b)
 {
 	if (request.major != 1 || request.minor > 1) {
 		status_line(b, 505); // HTTP Version Not Supported
+		return;
 	}
 
 	if (request.method != M_GET) {
