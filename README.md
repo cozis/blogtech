@@ -13,7 +13,5 @@ This is a minimal web server designed to serve my blog. I'm writing it to be rob
 I'm still testing manually. I usually stress test the server locally using `wrk` and see if it breaks. I also test it under `valgrind` and sanitizers.
 
 # Known Issues
-- When idle connections timeout, the server sends 408
-- Server tries to keep connections alive even when peer sends `Connection: Close`
 - Server replies to HTTP/1.0 clients as HTTP/1.1
 - Since poll is edge triggered, when the server is full and can't accept all new connections the remaining ones are left waiting until some other event wakes up poll()
