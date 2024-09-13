@@ -1311,16 +1311,22 @@ int main(int argc, char **argv)
 					log_data(LIT("Closing timeout\n"));
 				} else {
 					// Request timeout
-					byte_queue_write(&conn->output, LIT(
-						"HTTP/1.1 408 Request Timeout\r\n"
-						"Connection: Close\r\n"
-						"\r\n"));
-					conn->closing = true;
-					conn->start_time = now;
-					pollarray[i].events &= ~POLLIN;
-					pollarray[i].events |= POLLOUT;
-					pollarray[i].revents |= POLLOUT;
-					log_data(LIT("Request timeout\n"));
+					if (byte_queue_size(&conn->input) == 0) {
+						// Connection was idle, so just close it
+						remove = true;
+						log_data(LIT("Idle connection timeout\n"));
+					} else {
+						byte_queue_write(&conn->output, LIT(
+							"HTTP/1.1 408 Request Timeout\r\n"
+							"Connection: Close\r\n"
+							"\r\n"));
+						conn->closing = true;
+						conn->start_time = now;
+						pollarray[i].events &= ~POLLIN;
+						pollarray[i].events |= POLLOUT;
+						pollarray[i].revents |= POLLOUT;
+						log_data(LIT("Request timeout\n"));
+					}
 				}
 
 			} else if (!remove && (pollarray[i].revents & POLLIN)) {
