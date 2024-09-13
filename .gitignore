@@ -1,3 +1,6 @@
 serve
-serve_debug
+serve_*
+serve.gcno
 logs/log_*.txt
+*.info
+report

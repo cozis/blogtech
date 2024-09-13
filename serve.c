@@ -18,7 +18,7 @@
 #include <time.h>
 
 #define PORT 8080
-#define SHOW_IO 0
+#define SHOW_IO 1
 #define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
@@ -26,8 +26,14 @@
 #define LOG_BUFFER_SIZE (1<<20)
 #define LOG_BUFFER_LIMIT (1<<24)
 #define LOG_FLUSH_TIMEOUT_SEC 3
-#define LOG_DIRECTORY_SIZE_LIMIT_MB 1
+#define LOG_DIRECTORY_SIZE_LIMIT_MB 10
 #define INPUT_BUFFER_LIMIT_MB 1
+
+#ifndef NDEBUG
+#define DEBUG(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
+#else
+#define DEBUG(...) {}
+#endif
 
 static_assert(LOG_BUFFER_SIZE < LOG_BUFFER_LIMIT, "");
 
@@ -689,7 +695,7 @@ void print_bytes(string prefix, string str)
 			line_start = false;
 		}
 
-		log_data(substr(str, substr_offset, substr_length));
+		log_data((string) { src + substr_offset, substr_length });
 
 		if (i < len) {
 			if (src[i] == '\r')
@@ -1117,7 +1123,7 @@ bool read_from_socket(int fd, ByteQueue *queue)
 			break;
 		}
 #if SHOW_IO
-		print_bytes("> ", dst, num);
+		print_bytes(LIT("> "), (string) {dst.data, num});
 #endif
 		byte_queue_end_write(queue, (size_t) num);
 
@@ -1151,7 +1157,7 @@ bool write_to_socket(int fd, ByteQueue *queue)
 		}
 
 #if SHOW_IO
-		print_bytes("< ", src, num);
+		print_bytes(LIT("< "), (string) {src.data, num});
 #endif
 		byte_queue_end_read(queue, (size_t) num);
 	}
@@ -1214,6 +1220,8 @@ int main(int argc, char **argv)
 
 	int timeout = -1;
 	while (!stop) {
+
+		DEBUG("timeout=%d\n", timeout);
 
 		int ret = poll(pollarray, MAX_CONNECTIONS, timeout);
 		if (ret < 0) {
@@ -1734,7 +1742,7 @@ void log_choose_file_name(char *dst, size_t max)
 
 		int num = snprintf(dst, max, "logs/log_%d.txt", log_last_file_index);
 		if (num < 0 || (size_t) num >= max) {
-			fprintf(stderr, "log_failed\n");
+			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -1745,7 +1753,7 @@ void log_choose_file_name(char *dst, size_t max)
 			break;
 
 		if (log_last_file_index == 100000000) {
-			fprintf(stderr, "log_failed\n");
+			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -1757,7 +1765,7 @@ void log_init(void)
 {
 	log_buffer = mymalloc(LOG_BUFFER_SIZE);
 	if (log_buffer == NULL) {
-		fprintf(stderr, "log_failed\n");
+		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -1770,7 +1778,7 @@ void log_init(void)
 
 	log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 	if (log_fd < 0) {
-		fprintf(stderr, "log_failed\n");
+		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -1779,7 +1787,7 @@ void log_init(void)
 
 	DIR *d = opendir("logs");
 	if (d == NULL) {
-		fprintf(stderr, "log_failed\n");
+		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -1831,15 +1839,19 @@ bool log_empty(void)
 
 void log_flush(void)
 {
-	if (log_failed || log_buffer_used == 0)
+	DEBUG("flushing...\n");
+
+	if (log_failed || log_buffer_used == 0) {
+		DEBUG("flush ignored\n");
 		return;
+	}
 
 	/*
 	 * Rotate the file if the limit was reached
 	 */
 	struct stat buf;
 	if (fstat(log_fd, &buf)) {
-		fprintf(stderr, "log_failed\n");
+		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -1851,7 +1863,7 @@ void log_flush(void)
 		close(log_fd);
 		log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 		if (log_fd < 0) {
-			fprintf(stderr, "log_failed\n");
+			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -1868,14 +1880,14 @@ void log_flush(void)
 		if (num < 0) {
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "log_failed\n");
+			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
 		if (num == 0) {
 			zeros++;
 			if (zeros == 1000) {
-				fprintf(stderr, "log_failed\n");
+				fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 				log_failed = true;
 				return;
 			}
@@ -1892,6 +1904,8 @@ void log_flush(void)
 			return;
 		}
 	}
+
+	DEBUG("flushed %ld bytes\n", log_buffer_used);
 
 	assert(copied == log_buffer_used);
 	log_buffer_used = 0;
@@ -1923,6 +1937,7 @@ void log_format(const char *fmt, ...)
 	}
 
 	if (num < 0 || num > LOG_BUFFER_SIZE) {
+		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -1950,6 +1965,7 @@ void log_data(string str)
 
 	if (str.size > LOG_BUFFER_SIZE - log_buffer_used) {
 		if (str.size > LOG_BUFFER_SIZE) {
+			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -1960,6 +1976,8 @@ void log_data(string str)
 
 	memcpy(log_buffer + log_buffer_used, str.data, str.size);
 	log_buffer_used += str.size;
+
+	DEBUG("logged %ld bytes: [%.*s]\n", str.size, (int) str.size, str.data);
 }
 
 void log_perror(string str)
