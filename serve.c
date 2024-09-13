@@ -17,7 +17,14 @@
 #include <poll.h>
 #include <time.h>
 
+#ifdef RELEASE
+#define PORT 80
+#define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
+#else
 #define PORT 8080
+#define LOG_DIRECTORY_SIZE_LIMIT_MB 10
+#endif
+
 #define SHOW_IO 0
 #define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC 5
@@ -26,7 +33,6 @@
 #define LOG_BUFFER_SIZE (1<<20)
 #define LOG_BUFFER_LIMIT (1<<24)
 #define LOG_FLUSH_TIMEOUT_SEC 3
-#define LOG_DIRECTORY_SIZE_LIMIT_MB 10
 #define INPUT_BUFFER_LIMIT_MB 1
 
 #ifndef NDEBUG
@@ -327,7 +333,7 @@ int parse_request_head(string str, Request *request)
 
 char to_lower(char c)
 {
-    if (c >= 'A' || c <= 'Z')
+    if (c >= 'A' && c <= 'Z')
         return c - 'A' + 'a';
     else
         return c;
@@ -353,11 +359,13 @@ string trim(string s)
     size_t cur = 0;
     while (cur < s.size && is_space(s.data[cur]))
         cur++;
-    
+
     if (cur == s.size) {
         s.data = "";
         s.size = 0;
     } else {
+		s.data += cur;
+		s.size -= cur;
         while (is_space(s.data[s.size-1]))
             s.size--;
     }
@@ -711,6 +719,7 @@ typedef struct {
 	ByteQueue output;
 	int served_count;
 	bool closing;
+	bool keep_alive;
 	uint64_t creation_time;
 	uint64_t start_time;
 } Connection;
@@ -927,17 +936,29 @@ int num_conns = 0;
 
 bool should_keep_alive(Connection *conn)
 {
-	// Don't keep alive if the request is too old
-	if (now - conn->creation_time > CONNECTION_TIMEOUT_SEC * 1000)
+	// Don't keep alive if the peer doesn't want to
+	if (conn->keep_alive == false) {
+		DEBUG("Not keeping alive because peer wants to close\n");
 		return false;
+	}
+
+	// Don't keep alive if the request is too old
+	if (now - conn->creation_time > CONNECTION_TIMEOUT_SEC * 1000) {
+		DEBUG("Not keeping alive because the connection is too old\n");
+		return false;
+	}
 
 	// Don't keep alive if we served a lot of requests to this connection
-	if (conn->served_count > 100)
+	if (conn->served_count > 100) {
+		DEBUG("Not keeping alive because too many requests were served using this connection\n");
 		return false;
+	}
 
 	// Don't keep alive if the server is more than 70% full
-	if (num_conns > 0.7 * MAX_CONNECTIONS)
+	if (num_conns > 0.7 * MAX_CONNECTIONS) {
+		DEBUG("Not keeping alive because the server is more than 70%% full\n");
 		return false;
+	}
 
 	return true;
 }
@@ -1053,7 +1074,21 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 			break; // Request wasn't completely received yet
 
 		// Reset the request timer
-		conns->start_time = now;
+		conn->start_time = now;
+
+		conn->keep_alive = false;
+		string keep_alive_header;
+		if (find_header(&request, LIT("Connection"), &keep_alive_header)) {
+			DEBUG("Found Connection header\n");
+			if (string_match_case_insensitive(trim(keep_alive_header), LIT("Keep-Alive"))) {
+				conn->keep_alive = true;
+				DEBUG("Matched Keep-Alive (%.*s)\n", (int) trim(keep_alive_header).size, trim(keep_alive_header).data);
+			} else {
+				DEBUG("Didn't match Keep-Alive (%.*s)\n", (int) trim(keep_alive_header).size, trim(keep_alive_header).data);
+			}
+		} else {
+			DEBUG("No Connection header\n");
+		}
 
 		// Respond
 		ResponseBuilder builder;
@@ -1068,6 +1103,11 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 			if (byte_queue_size(&conn->output) > 0) {
 				polldata->events |= POLLOUT;
 				polldata->revents |= POLLOUT;
+			}
+			if (!conn->keep_alive) {
+				polldata->events &= ~POLLIN;
+				conn->closing = true;
+				conn->start_time = now;
 			}
 
 			pipeline_count++;
@@ -1154,6 +1194,9 @@ bool write_to_socket(int fd, ByteQueue *queue)
 
 int main(int argc, char **argv)
 {
+	(void) argc;
+	(void) argv;
+
 	signal(SIGTERM, handle_sigterm);
 	signal(SIGQUIT, handle_sigterm);
 	signal(SIGINT,  handle_sigterm);
@@ -1277,16 +1320,22 @@ int main(int argc, char **argv)
 					log_data(LIT("Closing timeout\n"));
 				} else {
 					// Request timeout
-					byte_queue_write(&conn->output, LIT(
-						"HTTP/1.1 408 Request Timeout\r\n"
-						"Connection: Close\r\n"
-						"\r\n"));
-					conn->closing = true;
-					conn->start_time = now;
-					pollarray[i].events &= ~POLLIN;
-					pollarray[i].events |= POLLOUT;
-					pollarray[i].revents |= POLLOUT;
-					log_data(LIT("Request timeout\n"));
+					if (byte_queue_size(&conn->input) == 0) {
+						// Connection was idle, so just close it
+						remove = true;
+						log_data(LIT("Idle connection timeout\n"));
+					} else {
+						byte_queue_write(&conn->output, LIT(
+							"HTTP/1.1 408 Request Timeout\r\n"
+							"Connection: Close\r\n"
+							"\r\n"));
+						conn->closing = true;
+						conn->start_time = now;
+						pollarray[i].events &= ~POLLIN;
+						pollarray[i].events |= POLLOUT;
+						pollarray[i].revents |= POLLOUT;
+						log_data(LIT("Request timeout\n"));
+					}
 				}
 
 			} else if (!remove && (pollarray[i].revents & POLLIN)) {
