@@ -960,12 +960,12 @@ uint64_t deadline_of(Connection *conn)
 	return conn->start_time + (conn->closing ? CLOSING_TIMEOUT_SEC : REQUEST_TIMEOUT_SEC) * 1000;
 }
 
-bool stop = false;
+volatile sig_atomic_t stop = 0;
 
 void handle_sigterm(int signum) 
 {
 	(void) signum;
-	stop = true;
+	stop = 1;
 }
 
 bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
