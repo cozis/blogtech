@@ -333,7 +333,7 @@ int parse_request_head(string str, Request *request)
 
 char to_lower(char c)
 {
-    if (c >= 'A' || c <= 'Z')
+    if (c >= 'A' && c <= 'Z')
         return c - 'A' + 'a';
     else
         return c;

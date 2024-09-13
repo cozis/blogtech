@@ -85,6 +85,14 @@ tests = [
 		Close(),
 	],
 	[
+		# Test that the connection header is insensitive to case and whitespace
+		Send(b"GET / HTTP/1.1\r\nConnection:   keEp-ALiVE   \r\n\r\n"),
+		Recv(b"HTTP/1.1 404 Not Found\r\nConnection: Keep-Alive\r\nContent-Length: 15       \r\n\r\nNothing here :|"),
+		Send(b"GET / HTTP/1.1\r\nConnection: closE\r\n\r\n"),
+		Recv(b"HTTP/1.1 404 Not Found\r\nConnection: Close\r\nContent-Length: 15       \r\n\r\nNothing here :|"),
+		Close(),
+	],
+	[
 		Send(b"XXX\r\n\r\n"),
 		Recv(b"HTTP/1.1 400 Bad Request\r\nConnection: Close\r\n\r\n"),
 	],
