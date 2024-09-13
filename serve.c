@@ -18,7 +18,7 @@
 #include <time.h>
 
 #define PORT 8080
-#define SHOW_IO 1
+#define SHOW_IO 0
 #define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
@@ -63,21 +63,15 @@ uint64_t get_current_time_ms(void)
 {
 	struct timespec ts;
 	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ret) {
-		log_fatal(LIT("Couldn't read time\n"));
-		abort();
-	}
-	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000) {
+	if (ret) log_fatal(LIT("Couldn't read time\n"));
+
+	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000)
 		log_fatal(LIT("Time overflow\n"));
-		abort();
-	}
 	uint64_t ms = ts.tv_sec * 1000;
 
 	uint64_t nsec_part = ts.tv_nsec / 1000000;
-	if (ms > UINT64_MAX - nsec_part) {
+	if (ms > UINT64_MAX - nsec_part)
 		log_fatal(LIT("Time overflow\n"));
-		abort();
-	}
 	ms += nsec_part;
 	return ms;
 }
@@ -677,8 +671,8 @@ static bool set_blocking(int fd, bool blocking)
 
 void print_bytes(string prefix, string str)
 {
-	const char *src = str.data;
-	size_t      len = str.size;
+	char  *src = str.data;
+	size_t len = str.size;
 
 	bool line_start = true;
 
@@ -749,10 +743,8 @@ void response_builder_init(ResponseBuilder *b, Connection *conn)
 
 void status_line(ResponseBuilder *b, int status)
 {
-	if (b->state != R_STATUS) {
+	if (b->state != R_STATUS)
 		log_fatal(LIT("Appending status line twice\n"));
-		abort();
-	}
 	if (!b->failed) {
 		char buf[1<<10];
 		string status_string = get_status_string(status);
@@ -771,7 +763,6 @@ void add_header(ResponseBuilder *b, string header)
 			log_fatal(LIT("Didn't write status line before headers\n"));
 		else
 			log_fatal(LIT("Can't add headers after content\n"));
-		abort();
 	}
 	if (b->failed)
 		return;
@@ -782,13 +773,13 @@ void add_header(ResponseBuilder *b, string header)
 	}
 }
 
-void add_header_f(ResponseBuilder *b, const char *format, ...)
+void add_header_f(ResponseBuilder *b, const char *fmt, ...)
 {
 	char buffer[1<<10];
 
 	va_list args;
-	va_start(args, format);
-	int num = vsnprintf(buffer, sizeof(buffer), format, args);
+	va_start(args, fmt);
+	int num = vsnprintf(buffer, sizeof(buffer), fmt, args);
 	va_end(args);
 
 	if (num < 0 || num >= (int) sizeof(buffer)) {
@@ -829,10 +820,9 @@ void append_content_s(ResponseBuilder *b, string str)
 		append_special_headers(b);
 		b->state = R_CONTENT;
 	}
-	if (b->state != R_CONTENT) {
+	if (b->state != R_CONTENT)
 		log_fatal(LIT("Invalid response builder state\n"));
-		abort();
-	}
+
 	if (b->failed)
 		return;
 
@@ -848,10 +838,9 @@ string append_content_start(ResponseBuilder *b, size_t cap)
 		append_special_headers(b);
 		b->state = R_CONTENT;
 	}
-	if (b->state != R_CONTENT) {
+	if (b->state != R_CONTENT)
 		log_fatal(LIT("Invalid response builder state\n"));
-		abort();
-	}
+
 	if (b->failed)
 		return NULLSTR;
 
@@ -906,10 +895,8 @@ void response_builder_complete(ResponseBuilder *b)
 		append_special_headers(b);
 		if (b->failed) return;
 	} else {
-		if (b->state != R_CONTENT) {
+		if (b->state != R_CONTENT)
 			log_fatal(LIT("Invalid response builder state\n"));
-			abort();
-		}
 	}
 	size_t current_offset = byte_queue_size(&b->conn->output);
 	size_t content_length = current_offset - b->content_offset;
@@ -1763,6 +1750,8 @@ void log_choose_file_name(char *dst, size_t max)
 
 void log_init(void)
 {
+	atexit(log_free);
+
 	log_buffer = mymalloc(LOG_BUFFER_SIZE);
 	if (log_buffer == NULL) {
 		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
@@ -1800,15 +1789,15 @@ void log_init(void)
 
 		char path[1<<12];
 		int k = snprintf(path, SIZEOF(path), "logs/%s", dir->d_name);
-		if (k < 0 || k >= SIZEOF(path)) abort();
+		if (k < 0 || k >= SIZEOF(path)) log_fatal(LIT("Bad format"));
 		path[k] = '\0';
 
 		struct stat buf;
 		if (stat(path, &buf))
-			abort();
+			log_fatal(LIT("Couldn't stat log file"));
 
 		if ((size_t) buf.st_size > SIZE_MAX - log_total_size)
-			abort();
+			log_fatal(LIT("Log file is too big"));
 		log_total_size += (size_t) buf.st_size;
 	}
 	closedir(d);
@@ -1823,13 +1812,16 @@ void log_init(void)
 
 void log_free(void)
 {
-	log_flush();
-	if (log_fd >= 0) close(log_fd);
-	free(log_buffer);
-	log_fd = -1;
-	log_buffer = NULL;
-	log_buffer_used = 0;
-	log_failed = false;
+	if (log_buffer) {
+		log_flush();
+		if (log_fd > -1)
+			close(log_fd);
+		free(log_buffer);
+		log_fd = -1;
+		log_buffer = NULL;
+		log_buffer_used = 0;
+		log_failed = false;
+	}
 }
 
 bool log_empty(void)
@@ -1914,8 +1906,7 @@ void log_flush(void)
 void log_fatal(string str)
 {
 	log_data(str);
-	log_free();
-	abort();
+	exit(-1);
 }
 
 void log_format(const char *fmt, ...)
@@ -1952,7 +1943,7 @@ void log_format(const char *fmt, ...)
 		int k = vsnprintf(log_buffer + log_buffer_used, LOG_BUFFER_SIZE - log_buffer_used, fmt, args);
 		va_end(args);
 
-		if (k != num) abort();
+		if (k != num) log_fatal(LIT("Bad format"));
 	}
 
 	log_buffer_used += num;
