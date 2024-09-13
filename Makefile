@@ -1,3 +1,5 @@
+.PHONY: all report
+
 all: serve_debug serve_cov serve
 
 serve_debug: serve.c

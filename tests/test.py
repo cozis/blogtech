@@ -112,6 +112,11 @@ tests = [
 		Delay(6),
 		Close()
 	],
+	[
+		# Test invalid protocol version
+		Send(b"GET /hello HTTP/2\r\nConnection: Keep-Alive\r\n\r\n"),
+		Recv(b"HTTP/1.1 505 HTTP Version Not Supported\r\nConnection: Keep-Alive\r\nContent-Length: 0        \r\n\r\n"),
+	],
 ]
 
 p = subprocess.Popen(['../serve_cov'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
