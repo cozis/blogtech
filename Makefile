@@ -7,7 +7,7 @@ serve_cov: serve.c
 	gcc serve.c -o serve_cov -Wall -Wextra -O2 -fprofile-arcs -ftest-coverage -lgcov
 
 serve: serve.c
-	gcc serve.c -o serve -Wall -Wextra -O2 -DNDEBUG
+	gcc serve.c -o serve -Wall -Wextra -O2 -DNDEBUG -DRELEASE
 
 report: 
 	lcov --capture --directory . --output-file coverage.info

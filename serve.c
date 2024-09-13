@@ -17,16 +17,22 @@
 #include <poll.h>
 #include <time.h>
 
+#ifdef RELEASE
+#define PORT 80
+#define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
+#else
 #define PORT 8080
-#define SHOW_IO 1
-#define SHOW_REQUESTS 0
+#define LOG_DIRECTORY_SIZE_LIMIT_MB 10
+#endif
+
+#define SHOW_IO 0
+#define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
 #define CONNECTION_TIMEOUT_SEC 60
 #define LOG_BUFFER_SIZE (1<<20)
 #define LOG_BUFFER_LIMIT (1<<24)
 #define LOG_FLUSH_TIMEOUT_SEC 3
-#define LOG_DIRECTORY_SIZE_LIMIT_MB 10
 #define INPUT_BUFFER_LIMIT_MB 1
 
 #ifndef NDEBUG
@@ -1188,6 +1194,9 @@ bool write_to_socket(int fd, ByteQueue *queue)
 
 int main(int argc, char **argv)
 {
+	(void) argc;
+	(void) argv;
+
 	signal(SIGTERM, handle_sigterm);
 	signal(SIGQUIT, handle_sigterm);
 	signal(SIGINT,  handle_sigterm);
