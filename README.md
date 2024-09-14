@@ -5,6 +5,8 @@ This is a minimal web server designed to serve my blog. I'm writing it to be rob
 - Linux only
 - HTTP/1.1 + pipelining + keep-alive
 - Request and connection deadlines
+- IP blacklist
+- Access log
 - No `Transfer-Encoding: Chunked` (when receiving a chunked request the server responds with `411 Length Required`, prompting the client to try again with the `Content-Length` header)
 - Static file serving utilities
 - Single core (This will probably change when I get a better VPS)
