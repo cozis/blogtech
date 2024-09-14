@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <dirent.h>
 #include <stdarg.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
@@ -27,6 +28,7 @@
 #define MAX_CONNECTIONS 32
 #endif
 
+#define ACCESS_LOG 1
 #define SHOW_IO 0
 #define SHOW_REQUESTS 0
 #define REQUEST_TIMEOUT_SEC 5
@@ -67,12 +69,8 @@ void log_format(const char *fmt, ...);
 void log_flush(void);
 bool log_empty(void);
 
-uint64_t get_current_time_ms(void)
+uint64_t timespec_to_ms(struct timespec ts)
 {
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ret) log_fatal(LIT("Couldn't read time\n"));
-
 	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000)
 		log_fatal(LIT("Time overflow\n"));
 	uint64_t ms = ts.tv_sec * 1000;
@@ -82,6 +80,22 @@ uint64_t get_current_time_ms(void)
 		log_fatal(LIT("Time overflow\n"));
 	ms += nsec_part;
 	return ms;
+}
+
+uint64_t get_monotonic_time_ms(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
+	return timespec_to_ms(ts);
+}
+
+uint64_t get_real_time_ms(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_REALTIME, &ts);
+	if (ret) log_fatal(LIT("Couldn't read real time\n"));
+	return timespec_to_ms(ts);
 }
 
 void *mymalloc(size_t num)
@@ -161,6 +175,7 @@ bool endswith(string suffix, string name)
 	return suffix.size <= name.size && !memcmp(tail, suffix.data, suffix.size);
 }
 
+// TODO: Make sure every string in request is reasonaly long
 int parse_request_head(string str, Request *request)
 {
 	char  *src = str.data;
@@ -716,6 +731,7 @@ void print_bytes(string prefix, string str)
 typedef struct {
 	ByteQueue input;
 	ByteQueue output;
+	uint32_t ipaddr;
 	int served_count;
 	bool closing;
 	bool keep_alive;
@@ -803,6 +819,7 @@ void add_header_f(ResponseBuilder *b, const char *fmt, ...)
 bool should_keep_alive(Connection *conn);
 
 uint64_t now;
+uint64_t real_now;
 
 void append_special_headers(ResponseBuilder *b)
 {
@@ -989,8 +1006,33 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 #endif
 
 		// Found! We got the request head
+
 		Request request;
 		int res = parse_request_head((string) {src.data, head_length}, &request);
+
+#if ACCESS_LOG
+		{
+			// Log access
+			time_t real_now_in_secs = real_now / 1000;
+			struct tm timeinfo;
+			localtime_r(&real_now_in_secs, &timeinfo);
+			char timebuf[128];
+			size_t timelen = strftime(timebuf, sizeof(timebuf), "%Y/%m/%d %H:%M:%S", &timeinfo);
+			if (timelen == 0)
+				log_fatal(LIT("Couldn't format time for access log"));
+			timebuf[timelen] = '\0';
+
+			char ipbuf[INET_ADDRSTRLEN];
+			const char *ipstr = inet_ntop(AF_INET, &conn->ipaddr, ipbuf, sizeof(ipbuf));
+			if (ipstr == NULL)
+				log_fatal(LIT("Couldn't format IP address for access log"));
+
+			string msg = res == P_OK ? request.path : LIT("Bad request");
+			assert(msg.size <= INT_MAX);
+			log_format("%s - %s - %.*s\n", timebuf, ipstr, (int) msg.size, msg.data);
+		}
+#endif
+
 		if (res != P_OK) {
 			// Invalid HTTP request
 			byte_queue_write(&conn->output, LIT(
@@ -1094,11 +1136,11 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 			pipeline_count++;
 			if (pipeline_count == 10) {
 				// TODO: We should send a response to the client instead of dropping it
+				log_data(LIT("Pipeline limit reached"));
 				remove = true;
 				break;
 			}
 		}
-
 	}
 
 	return remove;
@@ -1123,6 +1165,7 @@ bool read_from_socket(int fd, ByteQueue *queue)
 				continue;
 			if (errno == EAGAIN || errno == EWOULDBLOCK)
 				break;
+			log_perror(LIT("recv"));
 			remove = true;
 			break;
 		}
@@ -1241,7 +1284,8 @@ int main(int argc, char **argv)
 			return -1;
 		}
 
-		now = get_current_time_ms();
+		now = get_monotonic_time_ms();
+		real_now = get_real_time_ms();
 
 		if (pollarray[0].revents || pending_accept) {
 
@@ -1259,7 +1303,9 @@ int main(int argc, char **argv)
 					break;
 				}
 
-				int accepted_fd = accept(listen_fd, NULL, NULL);
+				struct sockaddr_in accepted_addr;
+				socklen_t accepted_addrlen = sizeof(accepted_addr);
+				int accepted_fd = accept(listen_fd, (struct sockaddr*) &accepted_addr, &accepted_addrlen);
 				if (accepted_fd < 0) {
 					if (errno == EINTR)
 						continue;
@@ -1278,6 +1324,7 @@ int main(int argc, char **argv)
 				pollarray[free_index].revents = 0;
 				byte_queue_init(&conns[free_index-1].input);
 				byte_queue_init(&conns[free_index-1].output);
+				conns[free_index-1].ipaddr = (uint32_t) accepted_addr.sin_addr.s_addr;
 				conns[free_index-1].closing = false;
 				conns[free_index-1].served_count = 0;
 				conns[free_index-1].creation_time = now;
