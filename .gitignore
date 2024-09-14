@@ -1,3 +1,4 @@
+*.o
 serve
 serve_*
 serve.gcno

@@ -14,4 +14,3 @@ I'm still testing manually. I usually stress test the server locally using `wrk`
 
 # Known Issues
 - Server replies to HTTP/1.0 clients as HTTP/1.1
-- Since poll is edge triggered, when the server is full and can't accept all new connections the remaining ones are left waiting until some other event wakes up poll()

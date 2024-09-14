@@ -20,13 +20,15 @@
 #ifdef RELEASE
 #define PORT 80
 #define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
+#define MAX_CONNECTIONS 1024
 #else
 #define PORT 8080
 #define LOG_DIRECTORY_SIZE_LIMIT_MB 10
+#define MAX_CONNECTIONS 32
 #endif
 
 #define SHOW_IO 0
-#define SHOW_REQUESTS 1
+#define SHOW_REQUESTS 0
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
 #define CONNECTION_TIMEOUT_SEC 60
@@ -84,10 +86,7 @@ uint64_t get_current_time_ms(void)
 
 void *mymalloc(size_t num)
 {
-	int x = 1; // rand();
-	if (x & 1)
-		return malloc(num);
-	return NULL;
+	return malloc(num);
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -327,7 +326,7 @@ int parse_request_head(string str, Request *request)
 			request->nheaders++;
 		}
 	}
-	cur += 2; // \r\n
+	// cur here points to the \r in \r\n
 	return P_OK;
 }
 
@@ -928,8 +927,6 @@ void response_builder_complete(ResponseBuilder *b)
 
 void respond(Request request, ResponseBuilder *b);
 
-#define MAX_CONNECTIONS 1024
-
 struct pollfd pollarray[MAX_CONNECTIONS+1];
 Connection conns[MAX_CONNECTIONS];
 int num_conns = 0;
@@ -937,28 +934,20 @@ int num_conns = 0;
 bool should_keep_alive(Connection *conn)
 {
 	// Don't keep alive if the peer doesn't want to
-	if (conn->keep_alive == false) {
-		DEBUG("Not keeping alive because peer wants to close\n");
+	if (conn->keep_alive == false)
 		return false;
-	}
 
 	// Don't keep alive if the request is too old
-	if (now - conn->creation_time > CONNECTION_TIMEOUT_SEC * 1000) {
-		DEBUG("Not keeping alive because the connection is too old\n");
+	if (now - conn->creation_time > CONNECTION_TIMEOUT_SEC * 1000)
 		return false;
-	}
 
 	// Don't keep alive if we served a lot of requests to this connection
-	if (conn->served_count > 100) {
-		DEBUG("Not keeping alive because too many requests were served using this connection\n");
+	if (conn->served_count > 100)
 		return false;
-	}
 
 	// Don't keep alive if the server is more than 70% full
-	if (num_conns > 0.7 * MAX_CONNECTIONS) {
-		DEBUG("Not keeping alive because the server is more than 70%% full\n");
+	if (num_conns > 0.7 * MAX_CONNECTIONS)
 		return false;
-	}
 
 	return true;
 }
@@ -1079,17 +1068,9 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 		conn->keep_alive = false;
 		string keep_alive_header;
 		if (find_header(&request, LIT("Connection"), &keep_alive_header)) {
-			DEBUG("Found Connection header\n");
-			if (string_match_case_insensitive(trim(keep_alive_header), LIT("Keep-Alive"))) {
+			if (string_match_case_insensitive(trim(keep_alive_header), LIT("Keep-Alive")))
 				conn->keep_alive = true;
-				DEBUG("Matched Keep-Alive (%.*s)\n", (int) trim(keep_alive_header).size, trim(keep_alive_header).data);
-			} else {
-				DEBUG("Didn't match Keep-Alive (%.*s)\n", (int) trim(keep_alive_header).size, trim(keep_alive_header).data);
-			}
-		} else {
-			DEBUG("No Connection header\n");
 		}
-
 		// Respond
 		ResponseBuilder builder;
 		response_builder_init(&builder, conn);
@@ -1248,30 +1229,33 @@ int main(int argc, char **argv)
 
 	uint64_t last_log_time = 0;
 
+	bool pending_accept = false;
 	int timeout = -1;
 	while (!stop) {
-
-		DEBUG("timeout=%d\n", timeout);
 
 		int ret = poll(pollarray, MAX_CONNECTIONS, timeout);
 		if (ret < 0) {
 			if (errno == EINTR)
-				break;
+				break; // TODO: Should this be continue?
 			log_perror(LIT("poll"));
 			return -1;
 		}
 
 		now = get_current_time_ms();
 
-		if (pollarray[0].revents) {
+		if (pollarray[0].revents || pending_accept) {
+
+			pending_accept = false;
+
 			for (;;) {
 
 				// Look for a connection structure
-				int free_index = 0;
-				while (free_index < MAX_CONNECTIONS && pollarray[free_index].fd != -1)
+				int free_index = 1;
+				while (free_index-1 < MAX_CONNECTIONS && pollarray[free_index].fd != -1)
 					free_index++;
-				if (free_index == MAX_CONNECTIONS) {
+				if (free_index-1 == MAX_CONNECTIONS) {
 					pollarray[0].events &= ~POLLIN; // Stop listening for incoming connections
+					pending_accept = true;
 					break;
 				}
 
@@ -1338,7 +1322,7 @@ int main(int argc, char **argv)
 					}
 				}
 
-			} else if (!remove && (pollarray[i].revents & POLLIN)) {
+			} else if (!remove && (pollarray[i].revents & (POLLIN | POLLHUP | POLLERR))) {
 
 				remove = read_from_socket(pollarray[i].fd, &conn->input);
 				if (!remove)
@@ -1365,6 +1349,8 @@ int main(int argc, char **argv)
 				conn->start_time = -1;
 				conn->closing = false;
 				conn->creation_time = 0;
+				if ((pollarray[0].events & POLLIN) == 0)
+					pollarray[0].events |= POLLIN;
 				num_conns--;
 			} else {
 				if (oldest == NULL || deadline_of(oldest) > deadline_of(conn)) oldest = conn;
@@ -1379,7 +1365,9 @@ int main(int argc, char **argv)
 		/*
 		 * Calculate the timeout for the next poll
 		 */
-		if (log_empty()) {
+		if (pending_accept && num_conns < MAX_CONNECTIONS)
+			timeout = 0;
+		else if (log_empty()) {
 			if (oldest == NULL)
 				timeout = -1;
 			else {
@@ -1563,8 +1551,10 @@ int match_path_format(string path, char *fmt, ...)
         assert(p_stack[i].size > 0);
 
         if (f_stack[i].data[0] == ':') {
-            if (f_stack[i].size != 2)
+            if (f_stack[i].size != 2) {
+				va_end(args);
                 return -1; // Invalid format
+			}
             switch (f_stack[i].data[1]) {
                 
                 case 'l':
@@ -1580,26 +1570,35 @@ int match_path_format(string path, char *fmt, ...)
                     size_t cur = 0;
                     while (cur < p_stack[i].size && is_digit(p_stack[i].data[cur])) {
                         int d = p_stack[i].data[cur] - '0';
-                        if (n > (UINT32_MAX - d) / 10)
+                        if (n > (UINT32_MAX - d) / 10) {
+							va_end(args);
                             return -1; // Overflow
+						}
                         n = n * 10 + d;
                         cur++;
                     }
-                    if (cur != p_stack[i].size)
+                    if (cur != p_stack[i].size) {
+						va_end(args);
                         return -1; // Component isn't a number
+					}
                     uint32_t *p = va_arg(args, uint32_t*);
                     *p = n;
                 }
                 break;
 
                 default:
+				va_end(args);
                 return -1; // Invalid formt
             }
         } else {
-            if (f_stack[i].size != p_stack[i].size)
+            if (f_stack[i].size != p_stack[i].size) {
+				va_end(args);
                 return 1; // No match
-            if (memcmp(f_stack[i].data, p_stack[i].data, f_stack[i].size))
-                return false;
+			}
+            if (memcmp(f_stack[i].data, p_stack[i].data, f_stack[i].size)) {
+				va_end(args);
+                return 1;
+			}
         }
     }
 
@@ -1851,7 +1850,7 @@ void log_init(void)
 	}
 	closedir(d);
 
-	static_assert(SIZEOF(size_t) > 4);
+	static_assert(SIZEOF(size_t) > 4, "It's assumed size_t can store a number of bytes in the order of 10gb");
 	if (log_total_size > (size_t) LOG_DIRECTORY_SIZE_LIMIT_MB * 1024 * 1024) {
 		fprintf(stderr, "Log reached disk limit at startup\n");
 		log_failed = true;
@@ -1880,12 +1879,8 @@ bool log_empty(void)
 
 void log_flush(void)
 {
-	DEBUG("flushing...\n");
-
-	if (log_failed || log_buffer_used == 0) {
-		DEBUG("flush ignored\n");
+	if (log_failed || log_buffer_used == 0)
 		return;
-	}
 
 	/*
 	 * Rotate the file if the limit was reached
@@ -1945,8 +1940,6 @@ void log_flush(void)
 			return;
 		}
 	}
-
-	DEBUG("flushed %ld bytes\n", log_buffer_used);
 
 	assert(copied == log_buffer_used);
 	log_buffer_used = 0;
@@ -2014,10 +2007,9 @@ void log_data(string str)
 	}
 	assert(str.size <= LOG_BUFFER_SIZE - log_buffer_used);
 
+	assert(log_buffer);
 	memcpy(log_buffer + log_buffer_used, str.data, str.size);
 	log_buffer_used += str.size;
-
-	DEBUG("logged %ld bytes: [%.*s]\n", str.size, (int) str.size, str.data);
 }
 
 void log_perror(string str)

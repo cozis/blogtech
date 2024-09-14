@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 @dataclass
 class Delay:
-	ms: float
+	sec: float
 
 @dataclass
 class Send:
@@ -116,6 +116,21 @@ tests = [
 		# Test invalid protocol version
 		Send(b"GET /hello HTTP/2\r\nConnection: Keep-Alive\r\n\r\n"),
 		Recv(b"HTTP/1.1 505 HTTP Version Not Supported\r\nConnection: Keep-Alive\r\nContent-Length: 0        \r\n\r\n"),
+	],
+	[
+		# Send request in pieces
+		Send(b"GET /hello HT"),
+		Delay(1),
+		Send(b"TP/1.1\r\nConnection: Ke"),
+		Delay(1),
+		Send(b"ep-Alive\r\n\r\n"),
+		Recv(b"HTTP/1.1 200 OK\r\nConnection: Keep-Alive\r\nContent-Length: 13       \r\n\r\nHello, world!"),
+	],
+	[
+		# Test pipelining
+		Send(b"GET /hello HTTP/1.1\r\nConnection: Keep-Alive\r\n\r\nGET /hello HTTP/1.1\r\nConnection: Keep-Alive\r\n\r\n"),
+		Recv(b"HTTP/1.1 200 OK\r\nConnection: Keep-Alive\r\nContent-Length: 13       \r\n\r\nHello, world!"),
+		Recv(b"HTTP/1.1 200 OK\r\nConnection: Keep-Alive\r\nContent-Length: 13       \r\n\r\nHello, world!"),
 	],
 ]
 
