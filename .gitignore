@@ -1,6 +1,9 @@
+*.o
 serve
 serve_*
 serve.gcno
 logs/log_*.txt
 *.info
+logs
 report
+blacklist.txt

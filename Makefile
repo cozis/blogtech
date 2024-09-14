@@ -1,3 +1,5 @@
+.PHONY: all report cppcheck gcc-analyzer clang-tidy
+
 all: serve_debug serve_cov serve
 
 serve_debug: serve.c
@@ -13,3 +15,13 @@ report:
 	lcov --capture --directory . --output-file coverage.info
 	@ mkdir -p report
 	genhtml coverage.info --output-directory report
+
+cppcheck:
+	cppcheck -j1 --enable=portability serve.c
+	cppcheck -j1 --enable=style serve.c
+
+gcc-analyzer:
+	gcc -c -fanalyzer serve.c
+
+clang-tidy:
+	clang-tidy serve.c
