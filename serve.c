@@ -20,13 +20,19 @@
 
 #ifdef RELEASE
 #define PORT 80
-#define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
 #define MAX_CONNECTIONS 1024
+#define LOG_BUFFER_SIZE (1<<20)
+#define LOG_FILE_LIMIT (1<<24)
+#define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
 #else
 #define PORT 8080
-#define LOG_DIRECTORY_SIZE_LIMIT_MB 10
 #define MAX_CONNECTIONS 32
+#define LOG_BUFFER_SIZE (1<<10)
+#define LOG_FILE_LIMIT (1<<20)
+#define LOG_DIRECTORY_SIZE_LIMIT_MB 100
 #endif
+
+#define LOG_DIRECTORY "logs"
 
 #define BLACKLIST 1
 #define BLACKLIST_FILE "blacklist.txt"
@@ -38,8 +44,6 @@
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
 #define CONNECTION_TIMEOUT_SEC 60
-#define LOG_BUFFER_SIZE (1<<20)
-#define LOG_BUFFER_LIMIT (1<<24)
 #define LOG_FLUSH_TIMEOUT_SEC 3
 #define INPUT_BUFFER_LIMIT_MB 1
 
@@ -49,7 +53,7 @@
 #define DEBUG(...) {}
 #endif
 
-static_assert(LOG_BUFFER_SIZE < LOG_BUFFER_LIMIT, "");
+static_assert(LOG_BUFFER_SIZE < LOG_FILE_LIMIT, "");
 
 typedef struct {
 	char  *data;
@@ -1845,11 +1849,12 @@ size_t   log_buffer_used = 0;
 bool     log_failed = false;
 size_t   log_total_size = 0;
 
-void log_choose_file_name(char *dst, size_t max)
+void log_choose_file_name(char *dst, size_t max, bool startup)
 {
+	size_t prev_size = -1;
 	for (;;) {
 
-		int num = snprintf(dst, max, "logs/log_%d.txt", log_last_file_index);
+		int num = snprintf(dst, max, LOG_DIRECTORY "/log_%d.txt", log_last_file_index);
 		if (num < 0 || (size_t) num >= max) {
 			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
@@ -1858,8 +1863,13 @@ void log_choose_file_name(char *dst, size_t max)
 		dst[num] = '\0';
 
 		struct stat buf;
-		if (stat(dst, &buf) && errno == ENOENT)
-			break;
+		if (stat(dst, &buf)) {
+			if (errno == ENOENT)
+				break;
+			prev_size = -1;
+		} else {
+			prev_size = (size_t) buf.st_size;
+		}
 
 		if (log_last_file_index == 100000000) {
 			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
@@ -1867,6 +1877,20 @@ void log_choose_file_name(char *dst, size_t max)
 			return;
 		}
 		log_last_file_index++;
+	}
+
+	// At startup don't create a new log file if the last one didn't reache its limit
+	if (startup && prev_size < LOG_FILE_LIMIT) {
+
+		log_last_file_index--;
+
+		int num = snprintf(dst, max, LOG_DIRECTORY "/log_%d.txt", log_last_file_index);
+		if (num < 0 || (size_t) num >= max) {
+			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			log_failed = true;
+			return;
+		}
+		dst[num] = '\0';
 	}
 }
 
@@ -1881,11 +1905,15 @@ void log_init(void)
 		return;
 	}
 
-	char name[1<<12];
-	log_choose_file_name(name, sizeof(name));
-	if (log_failed) {
+	if (mkdir(LOG_DIRECTORY, 0666) && errno != EEXIST) {
+		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		log_failed = true;
 		return;
 	}
+
+	char name[1<<12];
+	log_choose_file_name(name, sizeof(name), true);
+	if (log_failed) return; 
 
 	log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 	if (log_fd < 0) {
@@ -1896,7 +1924,7 @@ void log_init(void)
 
 	log_total_size = 0;
 
-	DIR *d = opendir("logs");
+	DIR *d = opendir(LOG_DIRECTORY);
 	if (d == NULL) {
 		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
@@ -1910,7 +1938,7 @@ void log_init(void)
 			continue;
 
 		char path[1<<12];
-		int k = snprintf(path, SIZEOF(path), "logs/%s", dir->d_name);
+		int k = snprintf(path, SIZEOF(path), LOG_DIRECTORY "/%s", dir->d_name);
 		if (k < 0 || k >= SIZEOF(path)) log_fatal(LIT("Bad format"));
 		path[k] = '\0';
 
@@ -1965,9 +1993,9 @@ void log_flush(void)
 		log_failed = true;
 		return;
 	}
-	if (buf.st_size + log_buffer_used >= LOG_BUFFER_LIMIT) {
+	if (buf.st_size + log_buffer_used >= LOG_FILE_LIMIT) {
 		char name[1<<12];
-		log_choose_file_name(name, SIZEOF(name));
+		log_choose_file_name(name, SIZEOF(name), false);
 		if (log_failed) return; 
 		
 		close(log_fd);
