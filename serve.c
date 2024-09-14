@@ -28,6 +28,10 @@
 #define MAX_CONNECTIONS 32
 #endif
 
+#define BLACKLIST 1
+#define BLACKLIST_FILE "blacklist.txt"
+#define BLACKLIST_LIMIT 1024
+
 #define ACCESS_LOG 1
 #define SHOW_IO 0
 #define SHOW_REQUESTS 0
@@ -68,6 +72,11 @@ void log_perror(string str);
 void log_format(const char *fmt, ...);
 void log_flush(void);
 bool log_empty(void);
+
+#if BLACKLIST
+bool ip_allowed(uint32_t ip);
+bool load_blacklist(void);
+#endif
 
 uint64_t timespec_to_ms(struct timespec ts)
 {
@@ -1250,6 +1259,13 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
+#if BLACKLIST
+	if (!load_blacklist()) {
+		log_data(LIT("Couldn't load blacklist\n"));
+		return -1;
+	}
+#endif
+
 	int one = 1;
 	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
 
@@ -1312,10 +1328,21 @@ int main(int argc, char **argv)
 					if (errno == EAGAIN || errno == EWOULDBLOCK)
 						break;
 					log_perror(LIT("accept"));
+					close(accepted_fd);
 					break;
 				}
+
+#if BLACKLIST
+				if (!ip_allowed((uint32_t) accepted_addr.sin_addr.s_addr)) {
+					log_data(LIT("Connection Rejected\n"));
+					close(accepted_fd);
+					continue;
+				}
+#endif
+
 				if (!set_blocking(accepted_fd, false)) {
 					log_perror(LIT("fcntl"));
+					close(accepted_fd);
 					continue;
 				}
 
@@ -2063,3 +2090,113 @@ void log_perror(string str)
 {
 	log_format("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
 }
+
+#if BLACKLIST
+
+uint32_t blocked_ips[BLACKLIST_LIMIT];
+int      blocked_num = 0;
+
+bool ip_allowed(uint32_t ip)
+{
+	for (int i = 0; i < blocked_num; i++)
+		if (ip == blocked_ips[i])
+			return false;
+	return true;
+}
+bool load_blacklist(void)
+{
+	int fd = open(BLACKLIST_FILE, O_RDONLY);
+	if (fd < 0) {
+		if (errno == ENOENT)
+			return true;
+		return false;
+	}
+
+	struct stat buf;
+	if (fstat(fd, &buf) || !S_ISREG(buf.st_mode)) {
+		log_data(LIT("Couldn't stat file or it's not a regular file"));
+		close(fd);
+		return false;
+	}
+	size_t size = (size_t) buf.st_size;
+
+	char *str = malloc(size);
+	if (str == NULL) {
+		log_data(LIT("out of memory"));
+		close(fd);
+		return false;
+	}
+
+	size_t copied = 0;
+	while (copied < size) {
+		int n = read(fd, str + copied, size - copied);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			log_perror(LIT("read"));
+			close(fd);
+			return false;
+		}
+		if (n == 0)
+			break; // EOF
+		copied += n;
+	}
+
+	blocked_num = 0;
+
+	// Parse the ip addresses
+	size_t cur = 0;
+	for (;;) {
+		// Get the start and end of the line
+		size_t start = cur;
+		while (cur < size && str[cur] != '\n' && str[cur] != '#')
+			cur++;
+		string line = { str + start, cur - start };
+		line = trim(line);
+
+		if (line.size > 0) {
+
+			char temp[sizeof("xxx.xxx.xxx.xxx")];
+			if (line.size >= sizeof(temp)) {
+				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
+				close(fd);
+				free(str);
+				return -1;
+			}
+			memcpy(temp, line.data, line.size);
+			temp[line.size] = '\0';
+
+			uint32_t ip;
+			if (inet_pton(AF_INET, temp, &ip) != 1) {
+				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
+				close(fd);
+				free(str);
+				return -1;
+			}
+
+			if (blocked_num == BLACKLIST_LIMIT) {
+				log_format("IP buffer is too short\n");
+				close(fd);
+				free(str);
+				return -1;
+			}
+
+			blocked_ips[blocked_num++] = ip;
+		}
+
+		if (cur < size && str[cur] == '#')
+			while (cur < size && str[cur] != '\n')
+				cur++;
+
+		if (cur == size)
+			break;
+		assert(str[cur] == '\n');
+		cur++;
+	}
+
+	close(fd);
+	free(str);
+	return true;
+}
+
+#endif /* BLACKLIST */
