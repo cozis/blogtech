@@ -1040,9 +1040,18 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 			if (ipstr == NULL)
 				log_fatal(LIT("Couldn't format IP address for access log"));
 
-			string msg = res == P_OK ? request.path : LIT("Bad request");
-			assert(msg.size <= INT_MAX);
-			log_format("%s - %s - %.*s\n", timebuf, ipstr, (int) msg.size, msg.data);
+			if (res == P_OK) {
+				string user_agent;
+				if (!find_header(&request, LIT("User-Agent"), &user_agent))
+					user_agent = LIT("No User-Agent");
+				else
+					user_agent = trim(user_agent);
+				log_format("%s - %s - %.*s - %.*s\n", timebuf, ipstr,
+					(int) request.path.size, request.path.data,
+					(int) user_agent.size, user_agent.data);
+			} else {
+				log_format("%s - %s - Bad request\n", timebuf, ipstr);
+			}
 		}
 #endif
 
@@ -1291,9 +1300,8 @@ int main(int argc, char **argv)
 	pollarray[0].events = POLLIN;
 
 	uint64_t last_log_time = 0;
-
 	bool pending_accept = false;
-	int timeout = -1;
+	int timeout =  log_empty() ? -1 : LOG_FLUSH_TIMEOUT_SEC * 1000;
 	while (!stop) {
 
 		int ret = poll(pollarray, MAX_CONNECTIONS, timeout);
