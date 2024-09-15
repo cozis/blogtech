@@ -1,3 +1,8 @@
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Headers                                                                                 ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
 #include <stdio.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -18,14 +23,24 @@
 #include <poll.h>
 #include <time.h>
 
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Configuration                                                                           ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+#ifndef HTTPS
+#define HTTPS 0
+#endif
+
 #ifdef RELEASE
 #define PORT 80
+#define HTTPS_PORT 443
 #define MAX_CONNECTIONS 1024
 #define LOG_BUFFER_SIZE (1<<20)
 #define LOG_FILE_LIMIT (1<<24)
 #define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
 #else
 #define PORT 8080
+#define HTTPS_PORT 8081
 #define MAX_CONNECTIONS 32
 #define LOG_BUFFER_SIZE (1<<10)
 #define LOG_FILE_LIMIT (1<<20)
@@ -33,6 +48,9 @@
 #endif
 
 #define LOG_DIRECTORY "logs"
+
+#define HTTPS_KEY_FILE  "key.pem"
+#define HTTPS_CERT_FILE "cert.pem"
 
 #define BLACKLIST 1
 #define BLACKLIST_FILE "blacklist.txt"
@@ -47,11 +65,17 @@
 #define LOG_FLUSH_TIMEOUT_SEC 3
 #define INPUT_BUFFER_LIMIT_MB 1
 
-#ifndef NDEBUG
-#define DEBUG(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
-#else
-#define DEBUG(...) {}
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Optional Headers                                                                        ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+#if HTTPS
+#include <bearssl.h>
 #endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Basic Definitions                                                                       ///
+///////////////////////////////////////////////////////////////////////////////////////////////
 
 static_assert(LOG_BUFFER_SIZE < LOG_FILE_LIMIT, "");
 
@@ -68,6 +92,16 @@ typedef struct {
 #define COUNTOF(X) (SIZEOF(X) / SIZEOF((X)[0]))
 #define NULLSTR (string) {.data=NULL, .size=0}
 
+#ifndef NDEBUG
+#define DEBUG(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
+#else
+#define DEBUG(...) {}
+#endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Forward Declarations                                                                    ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
 void log_init(void);
 void log_free(void);
 void log_data(string str);
@@ -81,6 +115,29 @@ bool log_empty(void);
 bool ip_allowed(uint32_t ip);
 bool load_blacklist(void);
 #endif
+
+#if HTTPS
+
+// Aggregate type for a private key.
+typedef struct {
+	int key_type;  // BR_KEYTYPE_RSA or BR_KEYTYPE_EC
+	union {
+		br_rsa_private_key rsa;
+		br_ec_private_key ec;
+	} key;
+} private_key;
+
+br_x509_certificate *read_certificates_from_file(string file, size_t *num);
+void                 free_certificates(br_x509_certificate *certs, size_t num);
+private_key *read_private_key(string file);
+void         free_private_key(private_key *sk);
+#endif
+
+bool load_file_contents(string file, string *out);
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// IMPLEMENTATION                                                                          ///
+//////////////////////////////////////////////////////////////////////////////////////////////
 
 uint64_t timespec_to_ms(struct timespec ts)
 {
@@ -116,9 +173,9 @@ void *mymalloc(size_t num)
 	return malloc(num);
 }
 
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// HTTP Request Parser                                                                     ///
+///////////////////////////////////////////////////////////////////////////////////////////////
 
 enum {
     P_OK,
@@ -746,10 +803,15 @@ typedef struct {
 	ByteQueue output;
 	uint32_t ipaddr;
 	int served_count;
+	bool https;
 	bool closing;
 	bool keep_alive;
 	uint64_t creation_time;
 	uint64_t start_time;
+#if HTTPS
+	br_ssl_server_context https_context;
+	char https_buffer[BR_SSL_BUFSIZE_BIDI];
+#endif
 } Connection;
 
 typedef enum {
@@ -957,7 +1019,7 @@ void response_builder_complete(ResponseBuilder *b)
 
 void respond(Request request, ResponseBuilder *b);
 
-struct pollfd pollarray[MAX_CONNECTIONS+1];
+struct pollfd pollarray[MAX_CONNECTIONS+2];
 Connection conns[MAX_CONNECTIONS];
 int num_conns = 0;
 
@@ -1158,7 +1220,7 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 			pipeline_count++;
 			if (pipeline_count == 10) {
 				// TODO: We should send a response to the client instead of dropping it
-				log_data(LIT("Pipeline limit reached"));
+				log_data(LIT("Pipeline limit reached\n"));
 				remove = true;
 				break;
 			}
@@ -1238,29 +1300,8 @@ bool write_to_socket(int fd, ByteQueue *queue)
 	return remove;
 }
 
-int main(int argc, char **argv)
+int create_listening_socket(int port)
 {
-	(void) argc;
-	(void) argv;
-
-	signal(SIGTERM, handle_sigterm);
-	signal(SIGQUIT, handle_sigterm);
-	signal(SIGINT,  handle_sigterm);
-
-	log_init();
-	log_data(LIT("starting\n"));
-
-	for (int i = 0; i < MAX_CONNECTIONS+1; i++) {
-		pollarray[i].fd = -1;
-		pollarray[i].events = 0;
-		pollarray[i].revents = 0;
-	}
-
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		byte_queue_init(&conns[i].input);
-		byte_queue_init(&conns[i].output);
-	}
-
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
 		log_perror(LIT("socket"));
@@ -1272,19 +1313,12 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
-#if BLACKLIST
-	if (!load_blacklist()) {
-		log_data(LIT("Couldn't load blacklist\n"));
-		return -1;
-	}
-#endif
-
 	int one = 1;
 	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
 
 	struct sockaddr_in addr;
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons(PORT);
+	addr.sin_port = htons(port);
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
 		log_perror(LIT("bind"));
@@ -1296,8 +1330,64 @@ int main(int argc, char **argv)
 		return -1;
 	}
 
+	return listen_fd;
+}
+
+int main(int argc, char **argv)
+{
+	(void) argc;
+	(void) argv;
+
+	signal(SIGPIPE, SIG_IGN);
+	signal(SIGTERM, handle_sigterm);
+	signal(SIGQUIT, handle_sigterm);
+	signal(SIGINT,  handle_sigterm);
+
+	log_init();
+	log_data(LIT("starting\n"));
+
+	for (int i = 0; i < MAX_CONNECTIONS+2; i++) {
+		pollarray[i].fd = -1;
+		pollarray[i].events = 0;
+		pollarray[i].revents = 0;
+	}
+
+	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+		byte_queue_init(&conns[i].input);
+		byte_queue_init(&conns[i].output);
+	}
+
+	int listen_fd = create_listening_socket(PORT);
+	if (listen_fd < 0) log_fatal(LIT("Couldn't bind\n"));
+	log_format("Listening on port %d\n", PORT);
 	pollarray[0].fd = listen_fd;
 	pollarray[0].events = POLLIN;
+	pollarray[0].revents = 0;
+
+#if HTTPS
+	int secure_fd = create_listening_socket(HTTPS_PORT);
+	if (secure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
+	log_format("Listening on port %d\n", HTTPS_PORT);
+	pollarray[1].fd = secure_fd;
+	pollarray[1].events = POLLIN;
+	pollarray[1].revents = 0;
+
+	size_t num_certs;
+	br_x509_certificate *certs = read_certificates_from_file(LIT(HTTPS_CERT_FILE), &num_certs);
+	if (certs == NULL)
+		log_fatal(LIT("Couldn't load certificates\n"));
+
+	private_key *pkey = read_private_key(LIT(HTTPS_KEY_FILE));
+	if (pkey == NULL)
+		log_fatal(LIT("Couldn't load private key\n"));
+#endif
+
+#if BLACKLIST
+	if (!load_blacklist()) {
+		log_data(LIT("Couldn't load blacklist\n"));
+		return -1;
+	}
+#endif
 
 	uint64_t last_log_time = 0;
 	bool pending_accept = false;
@@ -1315,74 +1405,121 @@ int main(int argc, char **argv)
 		now = get_monotonic_time_ms();
 		real_now = get_real_time_ms();
 
-		if (pollarray[0].revents || pending_accept) {
+		if ((pollarray[0].revents & ~POLLIN) || (pollarray[1].revents & ~POLLIN)) {
+			// TODO: Handle errors
+			log_fatal(LIT("error occurred on listening sockets"));
+		}
+
+		if ((pollarray[0].revents & POLLIN) || (pollarray[1].revents & POLLIN) || pending_accept) {
 
 			pending_accept = false;
 
-			for (;;) {
+			int desc_list[] = {
+				listen_fd,
+#if HTTPS
+				secure_fd,
+#endif
+			};
 
-				// Look for a connection structure
-				int free_index = 1;
-				while (free_index-1 < MAX_CONNECTIONS && pollarray[free_index].fd != -1)
-					free_index++;
-				if (free_index-1 == MAX_CONNECTIONS) {
-					pollarray[0].events &= ~POLLIN; // Stop listening for incoming connections
-					pending_accept = true;
-					break;
-				}
+			for (int i = 0; i < COUNTOF(desc_list); i++) {
 
-				struct sockaddr_in accepted_addr;
-				socklen_t accepted_addrlen = sizeof(accepted_addr);
-				int accepted_fd = accept(listen_fd, (struct sockaddr*) &accepted_addr, &accepted_addrlen);
-				if (accepted_fd < 0) {
-					if (errno == EINTR)
-						continue;
-					if (errno == EAGAIN || errno == EWOULDBLOCK)
+				int current_listener_fd = desc_list[i];
+
+				int pollarray_index = (listen_fd == current_listener_fd ? 0 : 1);
+
+				for (;;) {
+
+					// Look for a connection structure
+					int free_index = 2;
+					while (free_index-2 < MAX_CONNECTIONS && pollarray[free_index].fd != -1)
+						free_index++;
+					if (free_index-2 == MAX_CONNECTIONS) {
+						// Stop listening for incoming connections
+						pollarray[pollarray_index].events &= ~POLLIN;
+						pending_accept = true;
 						break;
-					log_perror(LIT("accept"));
-					close(accepted_fd);
-					break;
-				}
+					}
+
+					struct sockaddr_in accepted_addr;
+					socklen_t accepted_addrlen = sizeof(accepted_addr);
+					int accepted_fd = accept(current_listener_fd, (struct sockaddr*) &accepted_addr, &accepted_addrlen);
+					if (accepted_fd < 0) {
+						if (errno == EINTR)
+							continue;
+						if (errno == EAGAIN || errno == EWOULDBLOCK)
+							break;
+						log_perror(LIT("accept"));
+						close(accepted_fd);
+						break;
+					}
 
 #if BLACKLIST
-				if (!ip_allowed((uint32_t) accepted_addr.sin_addr.s_addr)) {
-					log_data(LIT("Connection Rejected\n"));
-					close(accepted_fd);
-					continue;
-				}
+					if (!ip_allowed((uint32_t) accepted_addr.sin_addr.s_addr)) {
+						log_data(LIT("Connection Rejected\n"));
+						close(accepted_fd);
+						continue;
+					}
 #endif
 
-				if (!set_blocking(accepted_fd, false)) {
-					log_perror(LIT("fcntl"));
-					close(accepted_fd);
-					continue;
-				}
+					if (!set_blocking(accepted_fd, false)) {
+						log_perror(LIT("fcntl"));
+						close(accepted_fd);
+						continue;
+					}
 
-				pollarray[free_index].fd = accepted_fd;
-				pollarray[free_index].events = POLLIN;
-				pollarray[free_index].revents = 0;
-				byte_queue_init(&conns[free_index-1].input);
-				byte_queue_init(&conns[free_index-1].output);
-				conns[free_index-1].ipaddr = (uint32_t) accepted_addr.sin_addr.s_addr;
-				conns[free_index-1].closing = false;
-				conns[free_index-1].served_count = 0;
-				conns[free_index-1].creation_time = now;
-				conns[free_index-1].start_time = now;
-				num_conns++;
-			}
+					struct pollfd *polldata = &pollarray[free_index];
+					Connection *conn = &conns[free_index-2];
+
+					polldata->fd = accepted_fd;
+#if HTTPS
+					polldata->events = POLLIN | POLLOUT;
+#else
+					polldata->events = POLLIN;
+#endif
+					polldata->revents = 0;
+
+					byte_queue_init(&conn->input);
+					byte_queue_init(&conn->output);
+					conn->ipaddr = (uint32_t) accepted_addr.sin_addr.s_addr;
+					conn->closing = false;
+					conn->https = false;
+					conn->served_count = 0;
+					conn->creation_time = now;
+					conn->start_time = now;
+					num_conns++;
+#if HTTPS
+					if (current_listener_fd == secure_fd) {
+						if (pkey->key_type == BR_KEYTYPE_RSA)
+							br_ssl_server_init_full_rsa(&conn->https_context, certs, num_certs, &pkey->key.rsa);
+						else {
+							assert(pkey->key_type == BR_KEYTYPE_EC);
+							unsigned issuer_key_type = BR_KEYTYPE_RSA; // Not sure if this or BR_KEYTYPE_EC
+							br_ssl_server_init_full_ec(&conn->https_context, certs, num_certs, issuer_key_type, &pkey->key.ec);
+						}
+						br_ssl_engine_set_versions(&conn->https_context.eng, BR_TLS10, BR_TLS12);
+						br_ssl_engine_set_buffer(&conn->https_context.eng, conn->https_buffer, sizeof(conn->https_buffer), 1);
+						br_ssl_server_reset(&conn->https_context);
+						conn->https = true;
+					}
+#endif
+				} /* accept loop */
+			} /* listener loop */
 		}
 
 		Connection *oldest = NULL;
 
-		for (int i = 1; i-1 < MAX_CONNECTIONS; i++) {
+		for (int i = 2; i-2 < MAX_CONNECTIONS; i++) {
 
 			if (pollarray[i].fd == -1)
 				continue;
 
-			Connection *conn = &conns[i-1];
+			struct pollfd *polldata = &pollarray[i];
+			Connection *conn = &conns[i-2];
 			bool remove = false;
 
-			if (!remove && now >= deadline_of(conn)) {
+			if (now >= deadline_of(conn)) {
+
+				assert(!remove);
 
 				if (conn->closing) {
 					// Closing timeout
@@ -1401,42 +1538,185 @@ int main(int argc, char **argv)
 							"\r\n"));
 						conn->closing = true;
 						conn->start_time = now;
-						pollarray[i].events &= ~POLLIN;
-						pollarray[i].events |= POLLOUT;
-						pollarray[i].revents |= POLLOUT;
+						polldata->events &= ~POLLIN;
+						polldata->events |= POLLOUT;
+						polldata->revents |= POLLOUT;
 						log_data(LIT("Request timeout\n"));
 					}
 				}
+			}
 
-			} else if (!remove && (pollarray[i].revents & (POLLIN | POLLHUP | POLLERR))) {
+			if (conn->https) {
+#if !HTTPS
+				log_fatal(LIT("Unreachable"));
+#else
+				br_ssl_engine_context *cc = &conn->https_context.eng;
+				bool flushed = false;
+				while (!remove) {
 
-				remove = read_from_socket(pollarray[i].fd, &conn->input);
-				if (!remove)
-					remove = respond_to_available_requests(&pollarray[i], conn);
-			} /* POLLIN */
+					int state = br_ssl_engine_current_state(cc);
 
-			if (!remove && (pollarray[i].revents & POLLOUT)) {
-				remove = write_to_socket(pollarray[i].fd, &conn->output);
-				if (!remove && byte_queue_size(&conn->output) == 0) {
-					pollarray[i].events &= ~POLLOUT;
-					if (conn->closing)
+					if (state & BR_SSL_CLOSED) {
+						// Engine is finished, no more I/O (until next reset).
+						int error = br_ssl_engine_last_error(cc);
+						if (error != BR_ERR_OK) {
+							const char *find_error_name(int err, const char **comment);
+							const char *ename = find_error_name(error, NULL);
+							if (ename == NULL) ename = "unknown";
+							log_format("SSL failure: %s\n", ename);
+						}
 						remove = true;
-				}
-			} /* POLLOUT */
+						break;
+					}
 
-			pollarray[i].revents = 0;
+					if ((state & BR_SSL_SENDREC) && (polldata->revents & POLLOUT)) {
+						// Engine has some bytes to send to the peer
+						size_t len;
+						unsigned char *buf = br_ssl_engine_sendrec_buf(cc, &len);
+						size_t copied = 0;
+						while (copied < len) {
+							int num = send(polldata->fd, buf + copied, len - copied, 0);
+							if (num < 0) {
+								if (errno == EINTR)
+									continue;
+								if (errno == EAGAIN || errno == EWOULDBLOCK) {
+									polldata->revents &= ~POLLOUT;
+									break;
+								}
+								perror("send");
+								remove = true;
+								break;
+							}
+							// TODO: Handle num=0
+							copied += (size_t) num;
+						}
+						if (remove) break;
+						br_ssl_engine_sendrec_ack(cc, copied);
+						flushed = false;
+					}
+
+					if ((state & BR_SSL_RECVAPP)) {
+						// Engine has obtained some application data from the 
+						// peer, that should be read by the caller.
+						size_t len;
+						unsigned char *buf = br_ssl_engine_recvapp_buf(cc, &len);
+						if (!byte_queue_ensure_min_free_space(&conn->input, len)) {
+							remove = true;
+							break;
+						}
+						string dst = byte_queue_start_write(&conn->input);
+						assert(dst.size >= len);
+						memcpy(dst.data, buf, len);
+#if SHOW_IO
+						print_bytes(LIT("> "), (string) {dst.data, len});
+#endif
+						byte_queue_end_write(&conn->input, len);
+						br_ssl_engine_recvapp_ack(cc, len);
+						remove = respond_to_available_requests(polldata, conn);
+						if (remove) break;
+						flushed = false;
+					}
+
+					if ((state & BR_SSL_RECVREC) && (polldata->revents & POLLIN)) {
+						// Engine expects some bytes from the peer
+						size_t len;
+						unsigned char *buf = br_ssl_engine_recvrec_buf(cc, &len);
+						size_t copied = 0;
+						while (copied < len) {
+							int num = recv(polldata->fd, buf + copied, len - copied, 0);
+							if (num < 0) {
+								if (errno == EINTR)
+									continue;
+								if (errno == EAGAIN || errno == EWOULDBLOCK) {
+									polldata->revents &= ~POLLIN;
+									break;
+								}
+								perror("recv");
+								remove = true;
+								break;
+							}
+							if (num == 0) {
+								remove = true;
+								break;
+							}
+							// TODO: Handle num=0
+							copied += (size_t) num;
+						}
+						if (remove) break;
+						br_ssl_engine_recvrec_ack(cc, copied);
+						flushed = false;
+					}
+
+					if ((state & BR_SSL_SENDAPP) && byte_queue_size(&conn->output) > 0) {
+						// Engine may receive application data to send (or flush).
+						size_t len;
+						unsigned char *buf = br_ssl_engine_sendapp_buf(cc, &len);
+						string src = byte_queue_start_read(&conn->output);
+						size_t copy = MIN(len, src.size);
+						memcpy(buf, src.data, copy);
+#if SHOW_IO
+						print_bytes(LIT("< "), (string) {src.data, copy});
+#endif
+						byte_queue_end_read(&conn->output, copy);
+						br_ssl_engine_sendapp_ack(cc, copy);
+						br_ssl_engine_flush(cc, 0); // TODO: Is this the right time to call it?
+						flushed = false;
+					}
+
+					if (flushed)
+						break;
+					br_ssl_engine_flush(cc, 0);
+					flushed = true;
+				}
+
+				if (!remove) {
+					int state = br_ssl_engine_current_state(cc);
+
+					polldata->events = 0;
+					if (state & BR_SSL_SENDREC) {
+						if (conn->closing && byte_queue_size(&conn->output) == 0)
+							remove = true;
+						else
+							polldata->events |= POLLOUT;
+					}
+
+					if (state & BR_SSL_RECVREC)
+						polldata->events |= POLLIN;
+				}
+
+#endif /* HTTPS */
+			} else {
+
+				if ((!remove && !conn->closing) && (polldata->revents & (POLLIN | POLLHUP | POLLERR))) {
+
+					remove = read_from_socket(polldata->fd, &conn->input);
+					if (!remove)
+						remove = respond_to_available_requests(polldata, conn);
+				} /* POLLIN */
+
+				if (!remove && (polldata->revents & POLLOUT)) {
+					remove = write_to_socket(polldata->fd, &conn->output);
+					if (!remove && byte_queue_size(&conn->output) == 0) {
+						polldata->events &= ~POLLOUT;
+						if (conn->closing)
+							remove = true;
+					}
+				} /* POLLOUT */
+			}
+
+			polldata->revents = 0;
 
 			if (remove) {
-				close(pollarray[i].fd);
-				pollarray[i].fd = -1;
-				pollarray[i].events = 0;
+				close(polldata->fd);
+				polldata->fd = -1;
+				polldata->events = 0;
 				byte_queue_free(&conn->input);
 				byte_queue_free(&conn->output);
 				conn->start_time = -1;
 				conn->closing = false;
 				conn->creation_time = 0;
-				if ((pollarray[0].events & POLLIN) == 0)
-					pollarray[0].events |= POLLIN;
+				if ((pollarray[0].events & POLLIN) == 0) pollarray[0].events |= POLLIN;
+				if ((pollarray[1].events & POLLIN) == 0) pollarray[1].events |= POLLIN;
 				num_conns--;
 			} else {
 				if (oldest == NULL || deadline_of(oldest) > deadline_of(conn)) oldest = conn;
@@ -1469,6 +1749,12 @@ int main(int argc, char **argv)
 		}
 
 	} /* main loop end */
+
+#if HTTPS
+	free_private_key(pkey);
+	free_certificates(certs, num_certs);
+	close(secure_fd);
+#endif
 
 	for (int i = 0; i < MAX_CONNECTIONS+1; i++)
 		if (pollarray[i].fd != -1)
@@ -2141,24 +2427,921 @@ bool ip_allowed(uint32_t ip)
 }
 bool load_blacklist(void)
 {
-	int fd = open(BLACKLIST_FILE, O_RDONLY);
-	if (fd < 0) {
+	string data = NULLSTR;
+	if (!load_file_contents(LIT(BLACKLIST_FILE), &data)) {
 		if (errno == ENOENT)
 			return true;
 		return false;
 	}
+	char  *str = data.data;
+	size_t len = data.size;
+
+	blocked_num = 0;
+
+	// Parse the ip addresses
+	size_t cur = 0;
+	for (;;) {
+		// Get the start and end of the line
+		size_t start = cur;
+		while (cur < len && str[cur] != '\n' && str[cur] != '#')
+			cur++;
+		string line = { str + start, cur - start };
+		line = trim(line);
+
+		if (line.size > 0) {
+
+			char temp[sizeof("xxx.xxx.xxx.xxx")];
+			if (line.size >= sizeof(temp)) {
+				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
+				free(str);
+				return false;
+			}
+			memcpy(temp, line.data, line.size);
+			temp[line.size] = '\0';
+
+			uint32_t ip;
+			if (inet_pton(AF_INET, temp, &ip) != 1) {
+				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
+				free(str);
+				return false;
+			}
+
+			if (blocked_num == BLACKLIST_LIMIT) {
+				log_format("IP buffer is too short\n");
+				free(str);
+				return false;
+			}
+
+			blocked_ips[blocked_num++] = ip;
+		}
+
+		if (cur < len && str[cur] == '#')
+			while (cur < len && str[cur] != '\n')
+				cur++;
+
+		if (cur == len)
+			break;
+		assert(str[cur] == '\n');
+		cur++;
+	}
+
+	free(str);
+	return true;
+}
+
+#endif /* BLACKLIST */
+
+#if HTTPS
+
+#define VECTOR(type)   struct { \
+		type *buf; \
+		size_t ptr, len; \
+	}
+
+#define VEC_INIT   { 0, 0, 0 }
+
+#define VEC_CLEAR(vec)   do { \
+		free((vec).buf); \
+		(vec).buf = NULL; \
+		(vec).ptr = 0; \
+		(vec).len = 0; \
+	} while (0)
+
+#define VEC_CLEAREXT(vec, fun)   do { \
+		size_t vec_tmp; \
+		for (vec_tmp = 0; vec_tmp < (vec).ptr; vec_tmp ++) { \
+			(fun)(&(vec).buf[vec_tmp]); \
+		} \
+		VEC_CLEAR(vec); \
+	} while (0)
+
+#define VEC_ADD(vec, x)   do { \
+		(vec).buf = vector_expand((vec).buf, sizeof *((vec).buf), \
+			&(vec).ptr, &(vec).len, 1); \
+		(vec).buf[(vec).ptr ++] = (x); \
+	} while (0)
+
+#define VEC_ADDMANY(vec, xp, num)   do { \
+		size_t vec_num = (num); \
+		(vec).buf = vector_expand((vec).buf, sizeof *((vec).buf), \
+			&(vec).ptr, &(vec).len, vec_num); \
+		memcpy((vec).buf + (vec).ptr, \
+			(xp), vec_num * sizeof *((vec).buf)); \
+		(vec).ptr += vec_num; \
+	} while (0)
+
+#define VEC_ELT(vec, idx)   ((vec).buf[idx])
+
+#define VEC_LEN(vec)   ((vec).ptr)
+
+#define VEC_TOARRAY(vec)    xblobdup((vec).buf, sizeof *((vec).buf) * (vec).ptr)
+
+typedef VECTOR(unsigned char) bvector;
+
+// Type for a named blob (the 'name' is a normalised PEM header name).
+typedef struct {
+	char *name;
+	unsigned char *data;
+	size_t data_len;
+} pem_object;
+
+static struct {
+	int err;
+	const char *name;
+	const char *comment;
+} errors[] = {
+	{
+		BR_ERR_BAD_PARAM,
+		"BR_ERR_BAD_PARAM",
+		"Caller-provided parameter is incorrect."
+	}, {
+		BR_ERR_BAD_STATE,
+		"BR_ERR_BAD_STATE",
+		"Operation requested by the caller cannot be applied with"
+		" the current context state (e.g. reading data while"
+		" outgoing data is waiting to be sent)."
+	}, {
+		BR_ERR_UNSUPPORTED_VERSION,
+		"BR_ERR_UNSUPPORTED_VERSION",
+		"Incoming protocol or record version is unsupported."
+	}, {
+		BR_ERR_BAD_VERSION,
+		"BR_ERR_BAD_VERSION",
+		"Incoming record version does not match the expected version."
+	}, {
+		BR_ERR_BAD_LENGTH,
+		"BR_ERR_BAD_LENGTH",
+		"Incoming record length is invalid."
+	}, {
+		BR_ERR_TOO_LARGE,
+		"BR_ERR_TOO_LARGE",
+		"Incoming record is too large to be processed, or buffer"
+		" is too small for the handshake message to send."
+	}, {
+		BR_ERR_BAD_MAC,
+		"BR_ERR_BAD_MAC",
+		"Decryption found an invalid padding, or the record MAC is"
+		" not correct."
+	}, {
+		BR_ERR_NO_RANDOM,
+		"BR_ERR_NO_RANDOM",
+		"No initial entropy was provided, and none can be obtained"
+		" from the OS."
+	}, {
+		BR_ERR_UNKNOWN_TYPE,
+		"BR_ERR_UNKNOWN_TYPE",
+		"Incoming record type is unknown."
+	}, {
+		BR_ERR_UNEXPECTED,
+		"BR_ERR_UNEXPECTED",
+		"Incoming record or message has wrong type with regards to"
+		" the current engine state."
+	}, {
+		BR_ERR_BAD_CCS,
+		"BR_ERR_BAD_CCS",
+		"ChangeCipherSpec message from the peer has invalid contents."
+	}, {
+		BR_ERR_BAD_ALERT,
+		"BR_ERR_BAD_ALERT",
+		"Alert message from the peer has invalid contents"
+		" (odd length)."
+	}, {
+		BR_ERR_BAD_HANDSHAKE,
+		"BR_ERR_BAD_HANDSHAKE",
+		"Incoming handshake message decoding failed."
+	}, {
+		BR_ERR_OVERSIZED_ID,
+		"BR_ERR_OVERSIZED_ID",
+		"ServerHello contains a session ID which is larger than"
+		" 32 bytes."
+	}, {
+		BR_ERR_BAD_CIPHER_SUITE,
+		"BR_ERR_BAD_CIPHER_SUITE",
+		"Server wants to use a cipher suite that we did not claim"
+		" to support. This is also reported if we tried to advertise"
+		" a cipher suite that we do not support."
+	}, {
+		BR_ERR_BAD_COMPRESSION,
+		"BR_ERR_BAD_COMPRESSION",
+		"Server wants to use a compression that we did not claim"
+		" to support."
+	}, {
+		BR_ERR_BAD_FRAGLEN,
+		"BR_ERR_BAD_FRAGLEN",
+		"Server's max fragment length does not match client's."
+	}, {
+		BR_ERR_BAD_SECRENEG,
+		"BR_ERR_BAD_SECRENEG",
+		"Secure renegotiation failed."
+	}, {
+		BR_ERR_EXTRA_EXTENSION,
+		"BR_ERR_EXTRA_EXTENSION",
+		"Server sent an extension type that we did not announce,"
+		" or used the same extension type several times in a"
+		" single ServerHello."
+	}, {
+		BR_ERR_BAD_SNI,
+		"BR_ERR_BAD_SNI",
+		"Invalid Server Name Indication contents (when used by"
+		" the server, this extension shall be empty)."
+	}, {
+		BR_ERR_BAD_HELLO_DONE,
+		"BR_ERR_BAD_HELLO_DONE",
+		"Invalid ServerHelloDone from the server (length is not 0)."
+	}, {
+		BR_ERR_LIMIT_EXCEEDED,
+		"BR_ERR_LIMIT_EXCEEDED",
+		"Internal limit exceeded (e.g. server's public key is too"
+		" large)."
+	}, {
+		BR_ERR_BAD_FINISHED,
+		"BR_ERR_BAD_FINISHED",
+		"Finished message from peer does not match the expected"
+		" value."
+	}, {
+		BR_ERR_RESUME_MISMATCH,
+		"BR_ERR_RESUME_MISMATCH",
+		"Session resumption attempt with distinct version or cipher"
+		" suite."
+	}, {
+		BR_ERR_INVALID_ALGORITHM,
+		"BR_ERR_INVALID_ALGORITHM",
+		"Unsupported or invalid algorithm (ECDHE curve, signature"
+		" algorithm, hash function)."
+	}, {
+		BR_ERR_BAD_SIGNATURE,
+		"BR_ERR_BAD_SIGNATURE",
+		"Invalid signature in ServerKeyExchange or"
+		" CertificateVerify message."
+	}, {
+		BR_ERR_WRONG_KEY_USAGE,
+		"BR_ERR_WRONG_KEY_USAGE",
+		"Peer's public key does not have the proper type or is"
+		" not allowed for the requested operation."
+	}, {
+		BR_ERR_NO_CLIENT_AUTH,
+		"BR_ERR_NO_CLIENT_AUTH",
+		"Client did not send a certificate upon request, or the"
+		" client certificate could not be validated."
+	}, {
+		BR_ERR_IO,
+		"BR_ERR_IO",
+		"I/O error or premature close on transport stream."
+	}, {
+		BR_ERR_X509_INVALID_VALUE,
+		"BR_ERR_X509_INVALID_VALUE",
+		"Invalid value in an ASN.1 structure."
+	},
+	{
+		BR_ERR_X509_TRUNCATED,
+		"BR_ERR_X509_TRUNCATED",
+		"Truncated certificate or other ASN.1 object."
+	},
+	{
+		BR_ERR_X509_EMPTY_CHAIN,
+		"BR_ERR_X509_EMPTY_CHAIN",
+		"Empty certificate chain (no certificate at all)."
+	},
+	{
+		BR_ERR_X509_INNER_TRUNC,
+		"BR_ERR_X509_INNER_TRUNC",
+		"Decoding error: inner element extends beyond outer element"
+		" size."
+	},
+	{
+		BR_ERR_X509_BAD_TAG_CLASS,
+		"BR_ERR_X509_BAD_TAG_CLASS",
+		"Decoding error: unsupported tag class (application or"
+		" private)."
+	},
+	{
+		BR_ERR_X509_BAD_TAG_VALUE,
+		"BR_ERR_X509_BAD_TAG_VALUE",
+		"Decoding error: unsupported tag value."
+	},
+	{
+		BR_ERR_X509_INDEFINITE_LENGTH,
+		"BR_ERR_X509_INDEFINITE_LENGTH",
+		"Decoding error: indefinite length."
+	},
+	{
+		BR_ERR_X509_EXTRA_ELEMENT,
+		"BR_ERR_X509_EXTRA_ELEMENT",
+		"Decoding error: extraneous element."
+	},
+	{
+		BR_ERR_X509_UNEXPECTED,
+		"BR_ERR_X509_UNEXPECTED",
+		"Decoding error: unexpected element."
+	},
+	{
+		BR_ERR_X509_NOT_CONSTRUCTED,
+		"BR_ERR_X509_NOT_CONSTRUCTED",
+		"Decoding error: expected constructed element, but is"
+		" primitive."
+	},
+	{
+		BR_ERR_X509_NOT_PRIMITIVE,
+		"BR_ERR_X509_NOT_PRIMITIVE",
+		"Decoding error: expected primitive element, but is"
+		" constructed."
+	},
+	{
+		BR_ERR_X509_PARTIAL_BYTE,
+		"BR_ERR_X509_PARTIAL_BYTE",
+		"Decoding error: BIT STRING length is not multiple of 8."
+	},
+	{
+		BR_ERR_X509_BAD_BOOLEAN,
+		"BR_ERR_X509_BAD_BOOLEAN",
+		"Decoding error: BOOLEAN value has invalid length."
+	},
+	{
+		BR_ERR_X509_OVERFLOW,
+		"BR_ERR_X509_OVERFLOW",
+		"Decoding error: value is off-limits."
+	},
+	{
+		BR_ERR_X509_BAD_DN,
+		"BR_ERR_X509_BAD_DN",
+		"Invalid distinguished name."
+	},
+	{
+		BR_ERR_X509_BAD_TIME,
+		"BR_ERR_X509_BAD_TIME",
+		"Invalid date/time representation."
+	},
+	{
+		BR_ERR_X509_UNSUPPORTED,
+		"BR_ERR_X509_UNSUPPORTED",
+		"Certificate contains unsupported features that cannot be"
+		" ignored."
+	},
+	{
+		BR_ERR_X509_LIMIT_EXCEEDED,
+		"BR_ERR_X509_LIMIT_EXCEEDED",
+		"Key or signature size exceeds internal limits."
+	},
+	{
+		BR_ERR_X509_WRONG_KEY_TYPE,
+		"BR_ERR_X509_WRONG_KEY_TYPE",
+		"Key type does not match that which was expected."
+	},
+	{
+		BR_ERR_X509_BAD_SIGNATURE,
+		"BR_ERR_X509_BAD_SIGNATURE",
+		"Signature is invalid."
+	},
+	{
+		BR_ERR_X509_TIME_UNKNOWN,
+		"BR_ERR_X509_TIME_UNKNOWN",
+		"Validation time is unknown."
+	},
+	{
+		BR_ERR_X509_EXPIRED,
+		"BR_ERR_X509_EXPIRED",
+		"Certificate is expired or not yet valid."
+	},
+	{
+		BR_ERR_X509_DN_MISMATCH,
+		"BR_ERR_X509_DN_MISMATCH",
+		"Issuer/Subject DN mismatch in the chain."
+	},
+	{
+		BR_ERR_X509_BAD_SERVER_NAME,
+		"BR_ERR_X509_BAD_SERVER_NAME",
+		"Expected server name was not found in the chain."
+	},
+	{
+		BR_ERR_X509_CRITICAL_EXTENSION,
+		"BR_ERR_X509_CRITICAL_EXTENSION",
+		"Unknown critical extension in certificate."
+	},
+	{
+		BR_ERR_X509_NOT_CA,
+		"BR_ERR_X509_NOT_CA",
+		"Not a CA, or path length constraint violation."
+	},
+	{
+		BR_ERR_X509_FORBIDDEN_KEY_USAGE,
+		"BR_ERR_X509_FORBIDDEN_KEY_USAGE",
+		"Key Usage extension prohibits intended usage."
+	},
+	{
+		BR_ERR_X509_WEAK_PUBLIC_KEY,
+		"BR_ERR_X509_WEAK_PUBLIC_KEY",
+		"Public key found in certificate is too small."
+	},
+	{
+		BR_ERR_X509_NOT_TRUSTED,
+		"BR_ERR_X509_NOT_TRUSTED",
+		"Chain could not be linked to a trust anchor."
+	},
+	{ 0, 0, 0 }
+};
+
+// Prepare a vector buffer for adding 'extra' elements.
+//   buf      current buffer
+//   esize    size of a vector element
+//   ptr      pointer to the 'ptr' vector field
+//   len      pointer to the 'len' vector field
+//   extra    number of elements to add
+//
+// If the buffer must be enlarged, then this function allocates the new
+// buffer and releases the old one. The new buffer address is then returned.
+// If the buffer needs not be enlarged, then the buffer address is returned.
+//
+// In case of enlargement, the 'len' field is adjusted accordingly. The
+// 'ptr' field is not modified.
+void *
+vector_expand(void *buf,
+	size_t esize, size_t *ptr, size_t *len, size_t extra)
+{
+	size_t nlen;
+	void *nbuf;
+
+	if (*len - *ptr >= extra) {
+		return buf;
+	}
+	nlen = (*len << 1);
+	if (nlen - *ptr < extra) {
+		nlen = extra + *ptr;
+		if (nlen < 8) {
+			nlen = 8;
+		}
+	}
+	nbuf = malloc(nlen * esize);
+	if (buf != NULL) {
+		memcpy(nbuf, buf, *len * esize);
+		free(buf);
+	}
+	*len = nlen;
+	return nbuf;
+}
+
+/* see brssl.h */
+const char *
+find_error_name(int err, const char **comment)
+{
+	size_t u;
+
+	for (u = 0; errors[u].name; u ++) {
+		if (errors[u].err == err) {
+			if (comment != NULL) {
+				*comment = errors[u].comment;
+			}
+			return errors[u].name;
+		}
+	}
+	return NULL;
+}
+
+void *xblobdup(const void *src, size_t len)
+{
+	void *buf;
+
+	buf = mymalloc(len);
+	memcpy(buf, src, len);
+	return buf;
+}
+
+char *xstrdup(const void *src)
+{
+	return xblobdup(src, strlen(src) + 1);
+}
+
+int is_ign(int c)
+{
+	if (c == 0) {
+		return 0;
+	}
+	if (c <= 32 || c == '-' || c == '_' || c == '.'
+		|| c == '/' || c == '+' || c == ':')
+	{
+		return 1;
+	}
+	return 0;
+}
+
+// Get next non-ignored character, normalised:
+//    ASCII letters are converted to lowercase
+//    control characters, space, '-', '_', '.', '/', '+' and ':' are ignored
+// A terminating zero is returned as 0.
+static int
+next_char(const char **ps, const char *limit)
+{
+	for (;;) {
+		int c;
+
+		if (*ps == limit) {
+			return 0;
+		}
+		c = *(*ps) ++;
+		if (c == 0) {
+			return 0;
+		}
+		if (c >= 'A' && c <= 'Z') {
+			c += 'a' - 'A';
+		}
+		if (!is_ign(c)) {
+			return c;
+		}
+	}
+}
+
+int eqstr_chunk(const char *s1, size_t s1_len, const char *s2, size_t s2_len)
+{
+	const char *lim1, *lim2;
+
+	lim1 = s1 + s1_len;
+	lim2 = s2 + s2_len;
+	for (;;) {
+		int c1, c2;
+
+		c1 = next_char(&s1, lim1);
+		c2 = next_char(&s2, lim2);
+		if (c1 != c2) {
+			return 0;
+		}
+		if (c1 == 0) {
+			return 1;
+		}
+	}
+}
+
+int eqstr(const char *s1, const char *s2)
+{
+	return eqstr_chunk(s1, strlen(s1), s2, strlen(s2));
+}
+
+static void
+vblob_append(void *cc, const void *data, size_t len)
+{
+	bvector *bv;
+
+	bv = cc;
+	VEC_ADDMANY(*bv, data, len);
+}
+
+void free_pem_object_contents(pem_object *po)
+{
+	if (po != NULL) {
+		free(po->name);
+		free(po->data);
+	}
+}
+
+pem_object *decode_pem(const void *src, size_t len, size_t *num)
+{
+	VECTOR(pem_object) pem_list = VEC_INIT;
+	br_pem_decoder_context pc;
+	pem_object po, *pos;
+	const unsigned char *buf;
+	bvector bv = VEC_INIT;
+	int inobj;
+	int extra_nl;
+
+	*num = 0;
+	br_pem_decoder_init(&pc);
+	buf = src;
+	inobj = 0;
+	po.name = NULL;
+	po.data = NULL;
+	po.data_len = 0;
+	extra_nl = 1;
+	while (len > 0) {
+		size_t tlen;
+
+		tlen = br_pem_decoder_push(&pc, buf, len);
+		buf += tlen;
+		len -= tlen;
+		switch (br_pem_decoder_event(&pc)) {
+
+		case BR_PEM_BEGIN_OBJ:
+			po.name = xstrdup(br_pem_decoder_name(&pc));
+			br_pem_decoder_setdest(&pc, vblob_append, &bv);
+			inobj = 1;
+			break;
+
+		case BR_PEM_END_OBJ:
+			if (inobj) {
+				po.data = VEC_TOARRAY(bv);
+				po.data_len = VEC_LEN(bv);
+				VEC_ADD(pem_list, po);
+				VEC_CLEAR(bv);
+				po.name = NULL;
+				po.data = NULL;
+				po.data_len = 0;
+				inobj = 0;
+			}
+			break;
+
+		case BR_PEM_ERROR:
+			free(po.name);
+			VEC_CLEAR(bv);
+			log_data(LIT("Invalid PEM encoding"));
+			VEC_CLEAREXT(pem_list, &free_pem_object_contents);
+			return NULL;
+		}
+
+		/*
+		 * We add an extra newline at the end, in order to
+		 * support PEM files that lack the newline on their last
+		 * line (this is somwehat invalid, but PEM format is not
+		 * standardised and such files do exist in the wild, so
+		 * we'd better accept them).
+		 */
+		if (len == 0 && extra_nl) {
+			extra_nl = 0;
+			buf = (const unsigned char *)"\n";
+			len = 1;
+		}
+	}
+	if (inobj) {
+		log_data(LIT("Unfinished PEM object"));
+		free(po.name);
+		VEC_CLEAR(bv);
+		VEC_CLEAREXT(pem_list, &free_pem_object_contents);
+		return NULL;
+	}
+
+	*num = VEC_LEN(pem_list);
+	VEC_ADD(pem_list, po);
+	pos = VEC_TOARRAY(pem_list);
+	VEC_CLEAR(pem_list);
+	return pos;
+}
+
+int looks_like_DER(const unsigned char *buf, size_t len)
+{
+	int fb;
+	size_t dlen;
+
+	if (len < 2) {
+		return 0;
+	}
+	if (*buf ++ != 0x30) {
+		return 0;
+	}
+	fb = *buf ++;
+	len -= 2;
+	if (fb < 0x80) {
+		return (size_t)fb == len;
+	} else if (fb == 0x80) {
+		return 0;
+	} else {
+		fb -= 0x80;
+		if (len < (size_t)fb + 2) {
+			return 0;
+		}
+		len -= (size_t)fb;
+		dlen = 0;
+		while (fb -- > 0) {
+			if (dlen > (len >> 8)) {
+				return 0;
+			}
+			dlen = (dlen << 8) + (size_t)*buf ++;
+		}
+		return dlen == len;
+	}
+}
+
+br_x509_certificate *read_certificates_from_buffer(unsigned char *buf, size_t len, size_t *num)
+{
+	VECTOR(br_x509_certificate) cert_list = VEC_INIT;
+	pem_object *pos;
+	size_t u, num_pos;
+	br_x509_certificate *xcs;
+	br_x509_certificate dummy;
+
+	*num = 0;
+
+	// Check for a DER-encoded certificate.
+	if (looks_like_DER(buf, len)) {
+		xcs = mymalloc(2 * sizeof *xcs);
+		xcs[0].data = buf;
+		xcs[0].data_len = len;
+		xcs[1].data = NULL;
+		xcs[1].data_len = 0;
+		*num = 1;
+		return xcs;
+	}
+
+	pos = decode_pem(buf, len, &num_pos);
+	if (pos == NULL)
+		return NULL;
+
+	for (u = 0; u < num_pos; u ++) {
+		if (eqstr(pos[u].name, "CERTIFICATE")
+			|| eqstr(pos[u].name, "X509 CERTIFICATE"))
+		{
+			br_x509_certificate xc;
+
+			xc.data = pos[u].data;
+			xc.data_len = pos[u].data_len;
+			pos[u].data = NULL;
+			VEC_ADD(cert_list, xc);
+		}
+	}
+	for (u = 0; u < num_pos; u ++) {
+		free_pem_object_contents(&pos[u]);
+	}
+	free(pos);
+
+	if (VEC_LEN(cert_list) == 0) {
+		log_data(LIT("No certificate in buffer\n"));
+		return NULL;
+	}
+	*num = VEC_LEN(cert_list);
+	dummy.data = NULL;
+	dummy.data_len = 0;
+	VEC_ADD(cert_list, dummy);
+	xcs = VEC_TOARRAY(cert_list);
+	VEC_CLEAR(cert_list);
+	return xcs;
+}
+
+br_x509_certificate *read_certificates_from_file(string file, size_t *num)
+{
+	string data;
+	if (!load_file_contents(file, &data))
+		return false;
+	br_x509_certificate *certs = read_certificates_from_buffer((unsigned char*) data.data, data.size, num);
+	free(data.data);
+	return certs;
+}
+
+void free_certificates(br_x509_certificate *certs, size_t num)
+{
+	size_t u;
+
+	for (u = 0; u < num; u ++) {
+		free(certs[u].data);
+	}
+	free(certs);
+}
+
+static private_key *
+decode_key(const unsigned char *buf, size_t len)
+{
+	br_skey_decoder_context dc;
+	int err;
+	private_key *sk;
+
+	br_skey_decoder_init(&dc);
+	br_skey_decoder_push(&dc, buf, len);
+	err = br_skey_decoder_last_error(&dc);
+	if (err != 0) {
+		const char *errname, *errmsg;
+
+		errname = find_error_name(err, &errmsg);
+		if (errname != NULL)
+			log_format("Error decoding key: %s: %s (%d)", errname, errmsg, err);
+		else
+			log_format("Error decoding key: unknown (%d)", err);
+		return NULL;
+	}
+	switch (br_skey_decoder_key_type(&dc)) {
+		const br_rsa_private_key *rk;
+		const br_ec_private_key *ek;
+
+	case BR_KEYTYPE_RSA:
+		rk = br_skey_decoder_get_rsa(&dc);
+		sk = mymalloc(sizeof *sk);
+		sk->key_type = BR_KEYTYPE_RSA;
+		sk->key.rsa.n_bitlen = rk->n_bitlen;
+		sk->key.rsa.p = xblobdup(rk->p, rk->plen);
+		sk->key.rsa.plen = rk->plen;
+		sk->key.rsa.q = xblobdup(rk->q, rk->qlen);
+		sk->key.rsa.qlen = rk->qlen;
+		sk->key.rsa.dp = xblobdup(rk->dp, rk->dplen);
+		sk->key.rsa.dplen = rk->dplen;
+		sk->key.rsa.dq = xblobdup(rk->dq, rk->dqlen);
+		sk->key.rsa.dqlen = rk->dqlen;
+		sk->key.rsa.iq = xblobdup(rk->iq, rk->iqlen);
+		sk->key.rsa.iqlen = rk->iqlen;
+		break;
+
+	case BR_KEYTYPE_EC:
+		ek = br_skey_decoder_get_ec(&dc);
+		sk = mymalloc(sizeof *sk);
+		sk->key_type = BR_KEYTYPE_EC;
+		sk->key.ec.curve = ek->curve;
+		sk->key.ec.x = xblobdup(ek->x, ek->xlen);
+		sk->key.ec.xlen = ek->xlen;
+		break;
+
+	default:
+		log_format("Unknown key type: %d\n", br_skey_decoder_key_type(&dc));
+		sk = NULL;
+		break;
+	}
+
+	return sk;
+}
+
+private_key *read_private_key(string file)
+{
+	unsigned char *buf;
+	size_t len;
+	private_key *sk;
+	pem_object *pos;
+	size_t num, u;
+
+	buf = NULL;
+	pos = NULL;
+	sk = NULL;
+
+	string out;
+	if (!load_file_contents(file, &out))
+		goto deckey_exit;
+	buf = (unsigned char*) out.data;
+	len = out.size;
+
+	if (looks_like_DER(buf, len)) {
+		sk = decode_key(buf, len);
+		goto deckey_exit;
+	} else {
+		pos = decode_pem(buf, len, &num);
+		if (pos == NULL) {
+			goto deckey_exit;
+		}
+		for (u = 0; pos[u].name; u ++) {
+			const char *name;
+
+			name = pos[u].name;
+			if (eqstr(name, "RSA PRIVATE KEY")
+				|| eqstr(name, "EC PRIVATE KEY")
+				|| eqstr(name, "PRIVATE KEY"))
+			{
+				sk = decode_key(pos[u].data, pos[u].data_len);
+				goto deckey_exit;
+			}
+		}
+		log_data(LIT("No private key in file\n"));
+		goto deckey_exit;
+	}
+
+deckey_exit:
+	if (buf != NULL) {
+		free(buf);
+	}
+	if (pos != NULL) {
+		for (u = 0; pos[u].name; u ++) {
+			free_pem_object_contents(&pos[u]);
+		}
+		free(pos);
+	}
+	return sk;
+}
+
+void free_private_key(private_key *sk)
+{
+	if (sk == NULL) {
+		return;
+	}
+	switch (sk->key_type) {
+	case BR_KEYTYPE_RSA:
+		free(sk->key.rsa.p);
+		free(sk->key.rsa.q);
+		free(sk->key.rsa.dp);
+		free(sk->key.rsa.dq);
+		free(sk->key.rsa.iq);
+		break;
+	case BR_KEYTYPE_EC:
+		free(sk->key.ec.x);
+		break;
+	}
+	free(sk);
+}
+
+#endif /* HTTPS */
+
+bool load_file_contents(string file, string *out)
+{
+	char copy[1<<12];
+	if (file.size >= sizeof(copy)) {
+		log_data(LIT("File path is larger than the static buffer\n"));
+		return false;
+	}
+	memcpy(copy, file.data, file.size);
+	copy[file.size] = '\0';
+
+	int fd = open(copy, O_RDONLY);
+	if (fd < 0)
+		return false;
 
 	struct stat buf;
 	if (fstat(fd, &buf) || !S_ISREG(buf.st_mode)) {
-		log_data(LIT("Couldn't stat file or it's not a regular file"));
+		log_data(LIT("Couldn't stat file or it's not a regular file\n"));
 		close(fd);
 		return false;
 	}
 	size_t size = (size_t) buf.st_size;
 
-	char *str = malloc(size);
+	char *str = mymalloc(size);
 	if (str == NULL) {
-		log_data(LIT("out of memory"));
+		log_data(LIT("out of memory\n"));
 		close(fd);
 		return false;
 	}
@@ -2171,6 +3354,7 @@ bool load_blacklist(void)
 				continue;
 			log_perror(LIT("read"));
 			close(fd);
+			free(str);
 			return false;
 		}
 		if (n == 0)
@@ -2178,61 +3362,8 @@ bool load_blacklist(void)
 		copied += n;
 	}
 
-	blocked_num = 0;
-
-	// Parse the ip addresses
-	size_t cur = 0;
-	for (;;) {
-		// Get the start and end of the line
-		size_t start = cur;
-		while (cur < size && str[cur] != '\n' && str[cur] != '#')
-			cur++;
-		string line = { str + start, cur - start };
-		line = trim(line);
-
-		if (line.size > 0) {
-
-			char temp[sizeof("xxx.xxx.xxx.xxx")];
-			if (line.size >= sizeof(temp)) {
-				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
-				close(fd);
-				free(str);
-				return -1;
-			}
-			memcpy(temp, line.data, line.size);
-			temp[line.size] = '\0';
-
-			uint32_t ip;
-			if (inet_pton(AF_INET, temp, &ip) != 1) {
-				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
-				close(fd);
-				free(str);
-				return -1;
-			}
-
-			if (blocked_num == BLACKLIST_LIMIT) {
-				log_format("IP buffer is too short\n");
-				close(fd);
-				free(str);
-				return -1;
-			}
-
-			blocked_ips[blocked_num++] = ip;
-		}
-
-		if (cur < size && str[cur] == '#')
-			while (cur < size && str[cur] != '\n')
-				cur++;
-
-		if (cur == size)
-			break;
-		assert(str[cur] == '\n');
-		cur++;
-	}
-
 	close(fd);
-	free(str);
+
+	*out = (string) {str, copied};
 	return true;
 }
-
-#endif /* BLACKLIST */

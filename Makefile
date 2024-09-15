@@ -1,15 +1,26 @@
 .PHONY: all report cppcheck gcc-analyzer clang-tidy
 
+HTTPS ?= 0
+
+COMMON_FLAGS   = -Wall -Wextra -DHTTPS=$(HTTPS)
+DEBUG_FLAGS    = -O0 -ggdb
+COVERAGE_FLAGS =  -fprofile-arcs -ftest-coverage -lgcov
+RELEASE_FLAGS  = -O2 -DNDEBUG -DRELEASE
+
+ifneq ($(HTTPS),0)
+	COMMON_FLAGS += -l:libbearssl.a -I3p/BearSSL/inc -L3p/BearSSL/build
+endif
+
 all: serve_debug serve_cov serve
 
-serve_debug: serve.c
-	gcc serve.c -o serve_debug -Wall -Wextra -O0 -ggdb
+serve: serve.c
+	gcc $< -o $@ $(COMMON_FLAGS) $(RELEASE_FLAGS)
 
 serve_cov: serve.c
-	gcc serve.c -o serve_cov -Wall -Wextra -O2 -fprofile-arcs -ftest-coverage -lgcov
+	gcc $< -o $@ $(COMMON_FLAGS) $(COVERAGE_FLAGS)
 
-serve: serve.c
-	gcc serve.c -o serve -Wall -Wextra -O2 -DNDEBUG -DRELEASE
+serve_debug: serve.c
+	gcc $< -o $@ $(COMMON_FLAGS) $(DEBUG_FLAGS)
 
 report: 
 	lcov --capture --directory . --output-file coverage.info

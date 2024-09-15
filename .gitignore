@@ -1,4 +1,5 @@
 *.o
+*.pem
 serve
 serve_*
 serve.gcno
@@ -7,3 +8,4 @@ logs/log_*.txt
 logs
 report
 blacklist.txt
+3p
