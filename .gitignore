@@ -2,7 +2,8 @@
 *.pem
 serve
 serve_*
-serve.gcno
+*.gcno
+*.gcda
 logs/log_*.txt
 *.info
 logs

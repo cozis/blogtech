@@ -694,6 +694,8 @@ bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
 
 string byte_queue_start_write(ByteQueue *q)
 {
+	if (q->data == NULL)
+		return NULLSTR;
     return (string) {
 		.data = q->data     + q->head + q->size,
 		.size = q->capacity - q->head - q->size,
@@ -707,6 +709,8 @@ void byte_queue_end_write(ByteQueue *q, size_t num)
 
 string byte_queue_start_read(ByteQueue *q)
 {
+	if (q->data == NULL)
+		return NULLSTR;
 	return (string) {
 		.data = q->data + q->head,
 		.size = q->size,
@@ -1394,7 +1398,7 @@ int main(int argc, char **argv)
 	int timeout =  log_empty() ? -1 : LOG_FLUSH_TIMEOUT_SEC * 1000;
 	while (!stop) {
 
-		int ret = poll(pollarray, MAX_CONNECTIONS, timeout);
+		int ret = poll(pollarray, MAX_CONNECTIONS+2, timeout);
 		if (ret < 0) {
 			if (errno == EINTR)
 				break; // TODO: Should this be continue?
@@ -1756,7 +1760,7 @@ int main(int argc, char **argv)
 	close(secure_fd);
 #endif
 
-	for (int i = 0; i < MAX_CONNECTIONS+1; i++)
+	for (int i = 0; i < MAX_CONNECTIONS+2; i++)
 		if (pollarray[i].fd != -1)
 			close(pollarray[i].fd);
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
