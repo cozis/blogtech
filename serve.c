@@ -1563,7 +1563,7 @@ int main(int argc, char **argv)
 									polldata->revents &= ~POLLOUT;
 									break;
 								}
-								perror("send");
+								log_perror(LIT("send"));
 								remove = true;
 								break;
 							}
@@ -1611,7 +1611,7 @@ int main(int argc, char **argv)
 									polldata->revents &= ~POLLIN;
 									break;
 								}
-								perror("recv");
+								log_perror(LIT("recv"));
 								remove = true;
 								break;
 							}
