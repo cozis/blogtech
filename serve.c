@@ -2372,12 +2372,10 @@ void log_data(string str)
 	if (log_failed)
 		return;
 
+    if (str.size > LOG_BUFFER_SIZE)
+		str = LIT("Log message was too long to log");
+
 	if (str.size > LOG_BUFFER_SIZE - log_buffer_used) {
-		if (str.size > LOG_BUFFER_SIZE) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
-			log_failed = true;
-			return;
-		}
 		log_flush();
 		if (log_failed) return;
 	}
