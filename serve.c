@@ -1437,7 +1437,6 @@ int main(int argc, char **argv)
 						if (errno == EAGAIN || errno == EWOULDBLOCK)
 							break;
 						log_perror(LIT("accept"));
-						close(accepted_fd);
 						break;
 					}
 
