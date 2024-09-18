@@ -1651,12 +1651,13 @@ int main(int argc, char **argv)
 				if (!remove) {
 					int state = br_ssl_engine_current_state(cc);
 
+
 					polldata->events = 0;
-					if (state & BR_SSL_SENDREC) {
+					if (state & BR_SSL_SENDREC)
+						polldata->events |= POLLOUT;
+					else {
 						if (conn->closing && byte_queue_size(&conn->output) == 0)
 							remove = true;
-						else
-							polldata->events |= POLLOUT;
 					}
 
 					if (state & BR_SSL_RECVREC)
