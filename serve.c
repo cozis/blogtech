@@ -52,10 +52,6 @@
 #define HTTPS_KEY_FILE  "key.pem"
 #define HTTPS_CERT_FILE "cert.pem"
 
-#define BLACKLIST 1
-#define BLACKLIST_FILE "blacklist.txt"
-#define BLACKLIST_LIMIT 1024
-
 #define ACCESS_LOG 1
 #define SHOW_IO 0
 #define SHOW_REQUESTS 0
@@ -110,11 +106,6 @@ void log_perror(string str);
 void log_format(const char *fmt, ...);
 void log_flush(void);
 bool log_empty(void);
-
-#if BLACKLIST
-bool ip_allowed(uint32_t ip);
-bool load_blacklist(void);
-#endif
 
 #if HTTPS
 
@@ -1386,13 +1377,6 @@ int main(int argc, char **argv)
 		log_fatal(LIT("Couldn't load private key\n"));
 #endif
 
-#if BLACKLIST
-	if (!load_blacklist()) {
-		log_data(LIT("Couldn't load blacklist\n"));
-		return -1;
-	}
-#endif
-
 	uint64_t last_log_time = 0;
 	bool pending_accept = false;
 	int timeout =  log_empty() ? -1 : LOG_FLUSH_TIMEOUT_SEC * 1000;
@@ -1456,14 +1440,6 @@ int main(int argc, char **argv)
 						close(accepted_fd);
 						break;
 					}
-
-#if BLACKLIST
-					if (!ip_allowed((uint32_t) accepted_addr.sin_addr.s_addr)) {
-						log_data(LIT("Connection Rejected\n"));
-						close(accepted_fd);
-						continue;
-					}
-#endif
 
 					if (!set_blocking(accepted_fd, false)) {
 						log_perror(LIT("fcntl"));
@@ -2416,84 +2392,6 @@ void log_perror(string str)
 {
 	log_format("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
 }
-
-#if BLACKLIST
-
-uint32_t blocked_ips[BLACKLIST_LIMIT];
-int      blocked_num = 0;
-
-bool ip_allowed(uint32_t ip)
-{
-	for (int i = 0; i < blocked_num; i++)
-		if (ip == blocked_ips[i])
-			return false;
-	return true;
-}
-bool load_blacklist(void)
-{
-	string data = NULLSTR;
-	if (!load_file_contents(LIT(BLACKLIST_FILE), &data)) {
-		if (errno == ENOENT)
-			return true;
-		return false;
-	}
-	char  *str = data.data;
-	size_t len = data.size;
-
-	blocked_num = 0;
-
-	// Parse the ip addresses
-	size_t cur = 0;
-	for (;;) {
-		// Get the start and end of the line
-		size_t start = cur;
-		while (cur < len && str[cur] != '\n' && str[cur] != '#')
-			cur++;
-		string line = { str + start, cur - start };
-		line = trim(line);
-
-		if (line.size > 0) {
-
-			char temp[sizeof("xxx.xxx.xxx.xxx")];
-			if (line.size >= sizeof(temp)) {
-				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
-				free(str);
-				return false;
-			}
-			memcpy(temp, line.data, line.size);
-			temp[line.size] = '\0';
-
-			uint32_t ip;
-			if (inet_pton(AF_INET, temp, &ip) != 1) {
-				log_format("Invalid IP address \"%.*s\"\n", (int) line.size, line.data);
-				free(str);
-				return false;
-			}
-
-			if (blocked_num == BLACKLIST_LIMIT) {
-				log_format("IP buffer is too short\n");
-				free(str);
-				return false;
-			}
-
-			blocked_ips[blocked_num++] = ip;
-		}
-
-		if (cur < len && str[cur] == '#')
-			while (cur < len && str[cur] != '\n')
-				cur++;
-
-		if (cur == len)
-			break;
-		assert(str[cur] == '\n');
-		cur++;
-	}
-
-	free(str);
-	return true;
-}
-
-#endif /* BLACKLIST */
 
 #if HTTPS
 
