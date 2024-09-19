@@ -231,7 +231,6 @@ bool endswith(string suffix, string name);
 bool startswith(string prefix, string str);
 void print_bytes(string prefix, string str);
 void *mymalloc(size_t num);
-uint64_t timespec_to_ms(struct timespec ts);
 uint64_t get_real_time_ms(void);
 uint64_t get_monotonic_time_ms(void);
 bool load_file_contents(string file, string *out);
@@ -303,12 +302,11 @@ void init_globals(void)
 	if (secure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
 	log_format("Listening on port %d\n", HTTPS_PORT);
 
-	size_t num_certs;
-	br_x509_certificate *certs = read_certificates_from_file(LIT(HTTPS_CERT_FILE), &num_certs);
+	certs = read_certificates_from_file(LIT(HTTPS_CERT_FILE), &num_certs);
 	if (certs == NULL)
 		log_fatal(LIT("Couldn't load certificates\n"));
 
-	private_key *pkey = read_private_key(LIT(HTTPS_KEY_FILE));
+	pkey = read_private_key(LIT(HTTPS_KEY_FILE));
 	if (pkey == NULL)
 		log_fatal(LIT("Couldn't load private key\n"));
 #else
@@ -327,9 +325,11 @@ void free_globals(void)
 	close(listen_fd);
 
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		close(conns[i].fd);
-		byte_queue_free(&conns[i].input);
-		byte_queue_free(&conns[i].output);
+		if (conns[i].fd != -1) {
+			close(conns[i].fd);
+			byte_queue_free(&conns[i].input);
+			byte_queue_free(&conns[i].output);
+		}
 	}
 	log_data(LIT("closing\n"));
 
@@ -1349,7 +1349,7 @@ int main(int argc, char **argv)
 
 #if HTTPS
 		if (pollarray[1].revents & POLLIN)
-			while (accept_connection(secure_fd, false));
+			while (accept_connection(secure_fd, true));
 #endif
 
 		Connection *oldest = NULL;
