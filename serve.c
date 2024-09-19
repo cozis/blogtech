@@ -51,6 +51,7 @@
 #define HTTPS_KEY_FILE  "key.pem"
 #define HTTPS_CERT_FILE "cert.pem"
 
+#define PROFILE 0
 #define ACCESS_LOG 1
 #define SHOW_IO 0
 #define SHOW_REQUESTS 0
@@ -66,6 +67,10 @@
 
 #if HTTPS
 #include <bearssl.h>
+#endif
+
+#if PROFILE
+#include <x86intrin.h>
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -91,6 +96,12 @@ typedef struct {
 #define DEBUG(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
 #else
 #define DEBUG(...) {}
+#endif
+
+#if PROFILE
+#define TIME(label) for (uint64_t start__ = __rdtsc(), done__ = 0; !done__; timed_scope_result(__COUNTER__, __rdtsc() - start__, LIT(label)), (done__=1))
+#else
+#define TIME(...)
 #endif
 
 enum {
@@ -201,6 +212,12 @@ void   byte_queue_end_read(ByteQueue *q, size_t num);
 bool   byte_queue_write(ByteQueue *q, string src);
 void   byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
 
+#if PROFILE
+void timing_init(void);
+void print_timing_results(void);
+void timed_scope_result(int scope_index, uint64_t delta_cycles, string label);
+#endif
+
 #if HTTPS
 
 // Aggregate type for a private key.
@@ -233,6 +250,7 @@ void print_bytes(string prefix, string str);
 void *mymalloc(size_t num);
 uint64_t get_real_time_ms(void);
 uint64_t get_monotonic_time_ms(void);
+uint64_t get_monotonic_time_ns(void);
 bool load_file_contents(string file, string *out);
 bool set_blocking(int fd, bool blocking);
 bool read_from_socket(int fd, ByteQueue *queue);
@@ -287,6 +305,10 @@ void init_globals(void)
 	log_init();
 	log_data(LIT("starting\n"));
 
+#if PROFILE
+	timing_init();
+#endif
+
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
 		conns[i].fd = -1;
 		byte_queue_init(&conns[i].input);
@@ -316,6 +338,11 @@ void init_globals(void)
 
 void free_globals(void)
 {
+
+#if PROFILE
+	print_timing_results();
+#endif
+
 #if HTTPS
 	free_private_key(pkey);
 	free_certificates(certs, num_certs);
@@ -918,7 +945,7 @@ bool respond_to_available_requests(Connection *conn)
 		int res = parse_request_head((string) {src.data, head_length}, &request);
 
 #if ACCESS_LOG
-		{
+		TIME("log_access") {
 			// Log access
 			time_t real_now_in_secs = real_now / 1000;
 			struct tm timeinfo;
@@ -1169,10 +1196,12 @@ bool update_connection_http(Connection *conn, struct pollfd *polldata)
 {
 	// POLLIN
 	if ((!conn->closing) && (polldata->revents & (POLLIN | POLLHUP | POLLERR))) {
+
 		if (read_from_socket(conn->fd, &conn->input))
 			return true;
 		if (respond_to_available_requests(conn))
 			return true;
+
 	}
 
 	// POLLOUT
@@ -1197,7 +1226,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 
 		int state = br_ssl_engine_current_state(cc);
 
-		if (state & BR_SSL_CLOSED) {
+		if (state & BR_SSL_CLOSED) TIME("BR_SSL_CLOSED") {
 			// Engine is finished, no more I/O (until next reset).
 			int error = br_ssl_engine_last_error(cc);
 			if (error != BR_ERR_OK) {
@@ -1210,7 +1239,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			return true;
 		}
 
-		if ((state & BR_SSL_SENDREC) && (polldata->revents & POLLOUT)) {
+		if ((state & BR_SSL_SENDREC) && (polldata->revents & POLLOUT)) TIME("BR_SSL_SENDREC") {
 			// Engine has some bytes to send to the peer
 			size_t len;
 			unsigned char *buf = br_ssl_engine_sendrec_buf(cc, &len);
@@ -1234,7 +1263,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			flushed = false;
 		}
 
-		if ((state & BR_SSL_RECVAPP)) {
+		if ((state & BR_SSL_RECVAPP)) TIME("BR_SSL_RECVAPP") {
 			// Engine has obtained some application data from the 
 			// peer, that should be read by the caller.
 			size_t len;
@@ -1254,7 +1283,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			flushed = false;
 		}
 
-		if ((state & BR_SSL_RECVREC) && (polldata->revents & POLLIN)) {
+		if ((state & BR_SSL_RECVREC) && (polldata->revents & POLLIN)) TIME("BR_SSL_RECVREC") {
 			// Engine expects some bytes from the peer
 			size_t len;
 			unsigned char *buf = br_ssl_engine_recvrec_buf(cc, &len);
@@ -1281,7 +1310,7 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			flushed = false;
 		}
 
-		if ((state & BR_SSL_SENDAPP) && byte_queue_size(&conn->output) > 0) {
+		if ((state & BR_SSL_SENDAPP) && byte_queue_size(&conn->output) > 0) TIME("BR_SSL_SENDAPP") {
 			// Engine may receive application data to send (or flush).
 			size_t len;
 			unsigned char *buf = br_ssl_engine_sendapp_buf(cc, &len);
@@ -1312,11 +1341,18 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 
 bool update_connection(Connection *conn, struct pollfd *polldata)
 {
+	bool ok;
+
+	TIME("update") {
 #if HTTPS
-	if (conn->https)
-		return update_connection_https(conn, polldata);
+		if (conn->https)
+			TIME("update-https") ok = update_connection_https(conn, polldata);
+		else
 #endif
-	return update_connection_http(conn, polldata);
+		TIME("update-http") ok = update_connection_http(conn, polldata);
+	}
+
+	return ok;
 }
 
 int main(int argc, char **argv)
@@ -2887,12 +2923,32 @@ uint64_t timespec_to_ms(struct timespec ts)
 	return ms;
 }
 
+uint64_t timespec_to_ns(struct timespec ts)
+{
+	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000000000)
+		log_fatal(LIT("Time overflow\n"));
+	uint64_t ns = ts.tv_sec * 1000000000;
+
+	if (ns > UINT64_MAX - ts.tv_nsec)
+		log_fatal(LIT("Time overflow\n"));
+	ns += ts.tv_nsec;
+	return ns;
+}
+
 uint64_t get_monotonic_time_ms(void)
 {
 	struct timespec ts;
 	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
 	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
 	return timespec_to_ms(ts);
+}
+
+uint64_t get_monotonic_time_ns(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
+	return timespec_to_ns(ts);
 }
 
 uint64_t get_real_time_ms(void)
@@ -3305,3 +3361,70 @@ bool set_blocking(int fd, bool blocking)
 
 	return true;
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Profiling                                                                               ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+#if PROFILE
+
+typedef struct {
+	string label;
+	uint64_t delta_cycles;
+	uint64_t exec_count;
+} timed_scope_t;
+
+timed_scope_t timed_scopes[__COUNTER__+1]; // +1 is just to avoid the zero length array
+uint64_t timing_init_time_ns;
+uint64_t timing_init_time_cycles;
+
+void timing_init(void)
+{
+	timing_init_time_ns = get_monotonic_time_ns();
+	timing_init_time_cycles = __rdtsc();
+}
+
+void human_readable_time_interval(uint64_t ns, char *dst, size_t max)
+{
+    if (ns > 1000000000)
+        snprintf(dst, max, "%.1Lf s", (long double) ns / 1000000000);
+    else if (ns > 1000000)
+        snprintf(dst, max, "%.1Lf ms", (long double) ns / 1000000);
+    else if (ns > 1000)
+        snprintf(dst, max, "%.1Lf us", (long double) ns / 1000);
+    else
+        snprintf(dst, max, "%.1Lf ns", (long double) ns);
+}
+
+void print_timing_results(void)
+{
+	uint64_t end_cycles = __rdtsc();
+	uint64_t end_ns = get_monotonic_time_ns();
+
+	double cy2ns = (double) (end_ns - timing_init_time_ns) / (end_cycles - timing_init_time_cycles);
+
+	printf("Printing timing results\n");
+	for (int i = 0; i < COUNTOF(timed_scopes); i++) {
+		timed_scope_t scope = timed_scopes[i];
+		if (scope.exec_count == 0)
+			continue;
+
+		char total_str[128];
+		char average_str[128];
+		human_readable_time_interval(cy2ns * scope.delta_cycles, total_str, sizeof(total_str));
+		human_readable_time_interval(cy2ns * scope.delta_cycles / scope.exec_count, average_str, sizeof(average_str));
+
+		printf("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
+			(int) scope.label.size, scope.label.data,
+			total_str, average_str, scope.exec_count);
+	}
+}
+
+void timed_scope_result(int scope_index, uint64_t delta_cycles, string label)
+{
+	timed_scopes[scope_index].label = label;
+	timed_scopes[scope_index].delta_cycles += delta_cycles;
+	timed_scopes[scope_index].exec_count++;
+}
+
+#endif
