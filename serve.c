@@ -1,4 +1,3 @@
-
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// Headers                                                                                 ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -53,7 +52,7 @@
 #define HTTPS_CERT_FILE "cert.pem"
 
 #define ACCESS_LOG 1
-#define SHOW_IO 0
+#define SHOW_IO 1
 #define SHOW_REQUESTS 0
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
@@ -70,7 +69,7 @@
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// Basic Definitions                                                                       ///
+/// Types and definitions                                                                   ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 static_assert(LOG_BUFFER_SIZE < LOG_FILE_LIMIT, "");
@@ -94,6 +93,90 @@ typedef struct {
 #define DEBUG(...) {}
 #endif
 
+enum {
+	P_OK,
+	P_INCOMPLETE,
+	P_BADMETHOD,
+	P_BADVERSION,
+	P_BADHEADER,
+};
+
+enum {
+	T_CHUNKED  = 1 << 0,
+	T_COMPRESS = 1 << 1,
+	T_DEFLATE  = 1 << 2,
+	T_GZIP     = 1 << 3,
+};
+
+typedef enum {
+	M_GET,
+	M_POST,
+	M_HEAD,
+	M_PUT,
+	M_DELETE,
+	M_CONNECT,
+	M_OPTIONS,
+	M_TRACE,
+	M_PATCH,
+} Method;
+
+#define MAX_HEADERS 32
+
+typedef struct {
+	string name;
+	string value;
+} Header;
+
+typedef struct {
+	Method method;
+	string path;
+	int    major;
+	int    minor;
+	int    nheaders;
+	Header headers[MAX_HEADERS];
+	string content;
+} Request;
+
+typedef struct {
+	char  *data;
+	size_t head;
+	size_t size;
+	size_t capacity;
+} ByteQueue;
+
+typedef struct {
+	int fd;
+	ByteQueue input;
+	ByteQueue output;
+	uint32_t ipaddr;
+	int served_count;
+	bool https;
+	bool closing;
+	bool keep_alive;
+	uint64_t creation_time;
+	uint64_t start_time;
+#if HTTPS
+	br_ssl_server_context https_context;
+	char https_buffer[BR_SSL_BUFSIZE_BIDI];
+#endif
+} Connection;
+
+typedef enum {
+	R_STATUS,
+	R_HEADER,
+	R_CONTENT,
+	R_COMPLETE,
+} ResponseBuilderState;
+
+typedef struct {
+	ResponseBuilderState state;
+	Connection *conn;
+	bool failed;
+	bool keep_alive;
+	size_t content_length_offset;
+	size_t content_offset;
+} ResponseBuilder;
+
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// Forward Declarations                                                                    ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -106,6 +189,17 @@ void log_perror(string str);
 void log_format(const char *fmt, ...);
 void log_flush(void);
 bool log_empty(void);
+
+void   byte_queue_init(ByteQueue *q);
+void   byte_queue_free(ByteQueue *q);
+size_t byte_queue_size(ByteQueue *q);
+bool   byte_queue_ensure_min_free_space(ByteQueue *q, size_t num);
+string byte_queue_start_write(ByteQueue *q);
+void   byte_queue_end_write(ByteQueue *q, size_t num);
+string byte_queue_start_read(ByteQueue *q);
+void   byte_queue_end_read(ByteQueue *q, size_t num);
+bool   byte_queue_write(ByteQueue *q, string src);
+void   byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
 
 #if HTTPS
 
@@ -124,117 +218,128 @@ private_key *read_private_key(string file);
 void         free_private_key(private_key *sk);
 #endif
 
+char to_lower(char c);
+bool is_print(char c);
+bool is_pcomp(char c);
+bool is_digit(char c);
+bool is_space(char c);
+string trim(string s);
+string substr(string str, size_t start, size_t end);
+bool streq(string s1, string s2);
+bool string_match_case_insensitive(string x, string y);
+bool endswith(string suffix, string name);
+bool startswith(string prefix, string str);
+void print_bytes(string prefix, string str);
+void *mymalloc(size_t num);
+uint64_t timespec_to_ms(struct timespec ts);
+uint64_t get_real_time_ms(void);
+uint64_t get_monotonic_time_ms(void);
 bool load_file_contents(string file, string *out);
+bool set_blocking(int fd, bool blocking);
+bool read_from_socket(int fd, ByteQueue *queue);
+bool write_to_socket(int fd, ByteQueue *queue);
+int create_listening_socket(int port);
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// GLOBALS                                                                                 ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+volatile sig_atomic_t stop = 0;
+
+Connection conns[MAX_CONNECTIONS];
+int num_conns = 0;
+
+uint64_t now;
+uint64_t real_now;
+
+int listen_fd;
+int secure_fd;
+
+#if HTTPS
+private_key         *pkey;
+br_x509_certificate *certs;
+size_t num_certs;
+#endif
+
+int    log_last_file_index = 0;
+int    log_fd = -1;
+char  *log_buffer = NULL;
+size_t log_buffer_used = 0;
+bool   log_failed = false;
+size_t log_total_size = 0;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// IMPLEMENTATION                                                                          ///
-//////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
 
-uint64_t timespec_to_ms(struct timespec ts)
+void handle_sigterm(int signum) 
 {
-	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000)
-		log_fatal(LIT("Time overflow\n"));
-	uint64_t ms = ts.tv_sec * 1000;
-
-	uint64_t nsec_part = ts.tv_nsec / 1000000;
-	if (ms > UINT64_MAX - nsec_part)
-		log_fatal(LIT("Time overflow\n"));
-	ms += nsec_part;
-	return ms;
+	(void) signum;
+	stop = 1;
 }
 
-uint64_t get_monotonic_time_ms(void)
+void init_globals(void)
 {
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
-	return timespec_to_ms(ts);
+	signal(SIGPIPE, SIG_IGN);
+	signal(SIGTERM, handle_sigterm);
+	signal(SIGQUIT, handle_sigterm);
+	signal(SIGINT,  handle_sigterm);
+
+	log_init();
+	log_data(LIT("starting\n"));
+
+	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+		conns[i].fd = -1;
+		byte_queue_init(&conns[i].input);
+		byte_queue_init(&conns[i].output);
+	}
+
+	listen_fd = create_listening_socket(PORT);
+	if (listen_fd < 0) log_fatal(LIT("Couldn't bind\n"));
+	log_format("Listening on port %d\n", PORT);
+
+#if HTTPS
+	secure_fd = create_listening_socket(HTTPS_PORT);
+	if (secure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
+	log_format("Listening on port %d\n", HTTPS_PORT);
+
+	size_t num_certs;
+	br_x509_certificate *certs = read_certificates_from_file(LIT(HTTPS_CERT_FILE), &num_certs);
+	if (certs == NULL)
+		log_fatal(LIT("Couldn't load certificates\n"));
+
+	private_key *pkey = read_private_key(LIT(HTTPS_KEY_FILE));
+	if (pkey == NULL)
+		log_fatal(LIT("Couldn't load private key\n"));
+#else
+	secure_fd = -1;
+#endif
 }
 
-uint64_t get_real_time_ms(void)
+void free_globals(void)
 {
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_REALTIME, &ts);
-	if (ret) log_fatal(LIT("Couldn't read real time\n"));
-	return timespec_to_ms(ts);
-}
+#if HTTPS
+	free_private_key(pkey);
+	free_certificates(certs, num_certs);
+	close(secure_fd);
+#endif
 
-void *mymalloc(size_t num)
-{
-	return malloc(num);
+	close(listen_fd);
+
+	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+		close(conns[i].fd);
+		byte_queue_free(&conns[i].input);
+		byte_queue_free(&conns[i].output);
+	}
+	log_data(LIT("closing\n"));
+
+	close(listen_fd);
+	log_free();
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// HTTP Request Parser                                                                     ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
-
-enum {
-    P_OK,
-    P_INCOMPLETE,
-    P_BADMETHOD,
-    P_BADVERSION,
-    P_BADHEADER,
-};
-
-enum {
-    T_CHUNKED  = 1 << 0,
-    T_COMPRESS = 1 << 1,
-    T_DEFLATE  = 1 << 2,
-    T_GZIP     = 1 << 3,
-};
-
-typedef enum {
-    M_GET,
-    M_POST,
-    M_HEAD,
-    M_PUT,
-    M_DELETE,
-    M_CONNECT,
-    M_OPTIONS,
-    M_TRACE,
-    M_PATCH,
-} Method;
-
-#define MAX_HEADERS 32
-
-typedef struct {
-    string name;
-    string value;
-} Header;
-
-typedef struct {
-    Method method;
-    string path;
-    int    major;
-    int    minor;
-    int    nheaders;
-    Header headers[MAX_HEADERS];
-    string content;
-} Request;
-
-bool is_digit(char c)
-{
-    return c >= '0' && c <= '9';
-}
-
-bool is_space(char c)
-{
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-bool startswith(string prefix, string str)
-{
-	if (prefix.size > str.size)
-		return false;
-	// TODO: What is prefix.data==NULL or str.data==NULL?
-	return !memcmp(prefix.data, str.data, prefix.size);
-}
-
-bool endswith(string suffix, string name)
-{
-	char *tail = name.data + (name.size - suffix.size);
-	return suffix.size <= name.size && !memcmp(tail, suffix.data, suffix.size);
-}
 
 // TODO: Make sure every string in request is reasonaly long
 int parse_request_head(string str, Request *request)
@@ -376,7 +481,7 @@ int parse_request_head(string str, Request *request)
 		// TODO: More robust
 		while (cur < len && src[cur] != ':')
 			cur++;
-		
+
 		name.data = src + start;
 		name.size = cur - start;
 
@@ -406,68 +511,14 @@ int parse_request_head(string str, Request *request)
 	return P_OK;
 }
 
-char to_lower(char c)
-{
-    if (c >= 'A' && c <= 'Z')
-        return c - 'A' + 'a';
-    else
-        return c;
-}
-
-bool string_match_case_insensitive(string x, string y)
-{
-    if (x.size != y.size)
-        return false;
-    for (size_t i = 0; i < x.size; i++)
-        if (to_lower(x.data[i]) != to_lower(y.data[i]))
-            return false;
-    return true;
-}
-
-bool match_header_name(string s1, string s2)
-{
-    return string_match_case_insensitive(s1, s2);
-}
-
-string trim(string s)
-{
-    size_t cur = 0;
-    while (cur < s.size && is_space(s.data[cur]))
-        cur++;
-
-    if (cur == s.size) {
-        s.data = "";
-        s.size = 0;
-    } else {
-		s.data += cur;
-		s.size -= cur;
-        while (is_space(s.data[s.size-1]))
-            s.size--;
-    }
-    return s;
-}
-
-string substr(string str, size_t start, size_t end)
-{
-	return (string) {
-		.data = str.data + start,
-		.size = end - start,
-	};
-}
-
-bool match_header_value(string s1, string s2)
-{
-    return string_match_case_insensitive(trim(s1), trim(s2));
-}
-
 bool find_header(Request *request, string name, string *value)
 {
-    for (int i = 0; i < request->nheaders; i++)
-        if (match_header_name(request->headers[i].name, name)) {
-            *value = request->headers[i].value;
-            return true;
-        }
-    return false;
+	for (int i = 0; i < request->nheaders; i++)
+		if (string_match_case_insensitive(request->headers[i].name, name)) {
+			*value = request->headers[i].value;
+			return true;
+		}
+	return false;
 }
 
 string get_status_string(int status)
@@ -568,262 +619,63 @@ size_t parse_content_length(string s)
 
 int find_and_parse_transfer_encoding(Request *request)
 {
-    string value;
-    if (!find_header(request, LIT("Transfer-Encoding"), &value))
-        return 0;
-    
-    int res = 0;
-    char  *src = value.data;
-    size_t len = value.size;
-    size_t cur = 0;
-    for (;;) {
-        
-        while (cur < len && (is_space(src[cur]) || src[cur] == ','))
-            cur++;
-        
-        if (cur+6 < len
-            && src[cur+0] == 'c'
-            && src[cur+1] == 'h'
-            && src[cur+2] == 'u'
-            && src[cur+3] == 'n'
-            && src[cur+4] == 'k'
-            && src[cur+5] == 'e'
-            && src[cur+6] == 'd') {
-            cur += 7;
-            res |= T_CHUNKED;
-        } else if (cur+7 < len
-            && src[cur+0] == 'c'
-            && src[cur+1] == 'o'
-            && src[cur+2] == 'm'
-            && src[cur+3] == 'p'
-            && src[cur+4] == 'r'
-            && src[cur+5] == 'e'
-            && src[cur+6] == 's'
-            && src[cur+7] == 's') {
-            cur += 8;
-            res |= T_COMPRESS;
-        } else if (cur+6 < len
-            && src[cur+0] == 'd'
-            && src[cur+1] == 'e'
-            && src[cur+2] == 'f'
-            && src[cur+3] == 'l'
-            && src[cur+4] == 'a'
-            && src[cur+5] == 't'
-            && src[cur+6] == 'e') {
-            cur += 7;
-            res |= T_DEFLATE;
-        } else if (cur+3 < len
-            && src[cur+0] == 'g'
-            && src[cur+1] == 'z'
-            && src[cur+2] == 'i'
-            && src[cur+3] == 'p') {
-            cur += 4;
-            res |= T_GZIP;
-        } else {
-            return -1;
-        }
-    }
-    return res;
-}
+	string value;
+	if (!find_header(request, LIT("Transfer-Encoding"), &value))
+		return 0;
 
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-
-typedef struct {
-    char  *data;
-    size_t head;
-    size_t size;
-    size_t capacity;
-} ByteQueue;
-
-void byte_queue_init(ByteQueue *q)
-{
-    q->data = NULL;
-    q->head = 0;
-    q->size = 0;
-    q->capacity = 0;
-}
-
-void byte_queue_free(ByteQueue *q)
-{
-    free(q->data);
-	byte_queue_init(q);
-}
-
-bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
-{
-    size_t total_free_space = q->capacity - q->size;
-    size_t free_space_after_data = q->capacity - q->size - q->head;
-
-    if (free_space_after_data < num) {
-        if (total_free_space < num) {
-            // Resize required
-
-            size_t capacity = 2 * q->capacity;
-            if (capacity - q->size < num) capacity = q->size + num;
-
-            char *data = mymalloc(capacity);
-            if (!data) return false;
-
-            if (q->size > 0)
-                memcpy(data, q->data + q->head, q->size);
-
-            free(q->data);
-            q->data = data;
-            q->capacity = capacity;
-
-        } else {
-            // Move required
-            memmove(q->data, q->data + q->head, q->size);
-            q->head = 0;
-        }
-    }
-
-    return true;
-}
-
-string byte_queue_start_write(ByteQueue *q)
-{
-	if (q->data == NULL)
-		return NULLSTR;
-    return (string) {
-		.data = q->data     + q->head + q->size,
-		.size = q->capacity - q->head - q->size,
-	};
-}
-
-void byte_queue_end_write(ByteQueue *q, size_t num)
-{
-    q->size += num;
-}
-
-string byte_queue_start_read(ByteQueue *q)
-{
-	if (q->data == NULL)
-		return NULLSTR;
-	return (string) {
-		.data = q->data + q->head,
-		.size = q->size,
-	};
-}
-
-size_t byte_queue_size(ByteQueue *q)
-{
-	return q->size;
-}
-
-void byte_queue_end_read(ByteQueue *q, size_t num)
-{
-    q->head += num;
-    q->size -= num;
-}
-
-bool byte_queue_write(ByteQueue *q, string src)
-{
-	if (!byte_queue_ensure_min_free_space(q, src.size))
-		return false;
-	string dst = byte_queue_start_write(q);
-	assert(dst.size >= src.size);
-	memcpy(dst.data, src.data, src.size);
-	byte_queue_end_write(q, src.size);
-	return true;
-}
-
-void byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len)
-{
-	// TODO: Safety checks
-	memcpy(q->data + q->head + offset, src, len);
-}
-
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-
-static bool set_blocking(int fd, bool blocking)
-{
-	int flags = fcntl(fd, F_GETFL, 0);
-
-	if (flags == -1)
-		return false;
-
-	if (blocking) flags &= ~O_NONBLOCK;
-	else          flags |= O_NONBLOCK;
-
-	if (fcntl(fd, F_SETFL, flags))
-		return false;
-
-	return true;
-}
-
-void print_bytes(string prefix, string str)
-{
-	char  *src = str.data;
-	size_t len = str.size;
-
-	bool line_start = true;
-
-	size_t i = 0;
-	while (i < len) {
-
-		size_t substr_offset = i;
-		while (i < len && src[i] != '\r' && src[i] != '\n')
-			i++;
-		size_t substr_length = i - substr_offset;
-
-		if (line_start) {
-			log_data(prefix);
-			line_start = false;
-		}
-
-		log_data((string) { src + substr_offset, substr_length });
-
-		if (i < len) {
-			if (src[i] == '\r')
-				log_data(LIT("\\r"));
-			else {
-				log_data(LIT("\\n\n"));
-				line_start = true;
-			}
-			i++;
+	int res = 0;
+	char  *src = value.data;
+	size_t len = value.size;
+	size_t cur = 0;
+	for (;;) {
+		
+		while (cur < len && (is_space(src[cur]) || src[cur] == ','))
+			cur++;
+		
+		if (cur+6 < len
+			&& src[cur+0] == 'c'
+			&& src[cur+1] == 'h'
+			&& src[cur+2] == 'u'
+			&& src[cur+3] == 'n'
+			&& src[cur+4] == 'k'
+			&& src[cur+5] == 'e'
+			&& src[cur+6] == 'd') {
+			cur += 7;
+			res |= T_CHUNKED;
+		} else if (cur+7 < len
+			&& src[cur+0] == 'c'
+			&& src[cur+1] == 'o'
+			&& src[cur+2] == 'm'
+			&& src[cur+3] == 'p'
+			&& src[cur+4] == 'r'
+			&& src[cur+5] == 'e'
+			&& src[cur+6] == 's'
+			&& src[cur+7] == 's') {
+			cur += 8;
+			res |= T_COMPRESS;
+		} else if (cur+6 < len
+			&& src[cur+0] == 'd'
+			&& src[cur+1] == 'e'
+			&& src[cur+2] == 'f'
+			&& src[cur+3] == 'l'
+			&& src[cur+4] == 'a'
+			&& src[cur+5] == 't'
+			&& src[cur+6] == 'e') {
+			cur += 7;
+			res |= T_DEFLATE;
+		} else if (cur+3 < len
+			&& src[cur+0] == 'g'
+			&& src[cur+1] == 'z'
+			&& src[cur+2] == 'i'
+			&& src[cur+3] == 'p') {
+			cur += 4;
+			res |= T_GZIP;
+		} else {
+			return -1;
 		}
 	}
-
-	if (!line_start)
-		log_data(LIT("\n"));
+	return res;
 }
-
-typedef struct {
-	ByteQueue input;
-	ByteQueue output;
-	uint32_t ipaddr;
-	int served_count;
-	bool https;
-	bool closing;
-	bool keep_alive;
-	uint64_t creation_time;
-	uint64_t start_time;
-#if HTTPS
-	br_ssl_server_context https_context;
-	char https_buffer[BR_SSL_BUFSIZE_BIDI];
-#endif
-} Connection;
-
-typedef enum {
-	R_STATUS,
-	R_HEADER,
-	R_CONTENT,
-	R_COMPLETE,
-} ResponseBuilderState;
-
-typedef struct {
-	ResponseBuilderState state;
-	Connection *conn;
-	bool failed;
-	bool keep_alive;
-	size_t content_length_offset;
-	size_t content_offset;
-} ResponseBuilder;
 
 void response_builder_init(ResponseBuilder *b, Connection *conn)
 {
@@ -887,9 +739,6 @@ void add_header_f(ResponseBuilder *b, const char *fmt, ...)
 }
 
 bool should_keep_alive(Connection *conn);
-
-uint64_t now;
-uint64_t real_now;
 
 void append_special_headers(ResponseBuilder *b)
 {
@@ -1014,10 +863,6 @@ void response_builder_complete(ResponseBuilder *b)
 
 void respond(Request request, ResponseBuilder *b);
 
-struct pollfd pollarray[MAX_CONNECTIONS+2];
-Connection conns[MAX_CONNECTIONS];
-int num_conns = 0;
-
 bool should_keep_alive(Connection *conn)
 {
 	// Don't keep alive if the peer doesn't want to
@@ -1044,15 +889,7 @@ uint64_t deadline_of(Connection *conn)
 	return conn->start_time + (conn->closing ? CLOSING_TIMEOUT_SEC : REQUEST_TIMEOUT_SEC) * 1000;
 }
 
-volatile sig_atomic_t stop = 0;
-
-void handle_sigterm(int signum) 
-{
-	(void) signum;
-	stop = 1;
-}
-
-bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
+bool respond_to_available_requests(Connection *conn)
 {
 	bool remove = false;
 
@@ -1118,9 +955,6 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 				"HTTP/1.1 400 Bad Request\r\n"
 				"Connection: Close\r\n"
 				"\r\n"));
-			polldata->events &= ~POLLIN;
-			polldata->events |= POLLOUT;
-			polldata->revents |= POLLOUT;
 			conn->closing = true;
 			conn->start_time = now;
 			break;
@@ -1136,9 +970,6 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 					"HTTP/1.1 411 Length Required\r\n"
 					"Connection: Close\r\n"
 					"\r\n"));
-				polldata->events &= ~POLLIN;
-				polldata->events |= POLLOUT;
-				polldata->revents |= POLLOUT;
 				conn->closing = true;
 				conn->start_time = now;
 				log_data(LIT("Content-Length missing\n"));
@@ -1154,9 +985,6 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 					"HTTP/1.1 400 Bad Request\r\n"
 					"Connection: Close\r\n"
 					"\r\n"));
-				polldata->events &= ~POLLIN;
-				polldata->events |= POLLOUT;
-				polldata->revents |= POLLOUT;
 				conn->closing = true;
 				conn->start_time = now;
 				log_data(LIT("Invalid Content-Length\n"));
@@ -1170,9 +998,6 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 				"HTTP/1.1 413 Content Too Large\r\n"
 				"Connection: Close\r\n"
 				"\r\n"));
-			polldata->events &= ~POLLIN;
-			polldata->events |= POLLOUT;
-			polldata->revents |= POLLOUT;
 			conn->closing = true;
 			conn->start_time = now;
 			log_data(LIT("Request too large\n"));
@@ -1202,12 +1027,7 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 		else {
 			conn->served_count++;
 			byte_queue_end_read(&conn->input, request_length);
-			if (byte_queue_size(&conn->output) > 0) {
-				polldata->events |= POLLOUT;
-				polldata->revents |= POLLOUT;
-			}
 			if (!conn->keep_alive) {
-				polldata->events &= ~POLLIN;
 				conn->closing = true;
 				conn->start_time = now;
 			}
@@ -1225,107 +1045,278 @@ bool respond_to_available_requests(struct pollfd *polldata, Connection *conn)
 	return remove;
 }
 
-bool read_from_socket(int fd, ByteQueue *queue)
+void build_poll_array(struct pollfd pollarray[static MAX_CONNECTIONS+2])
 {
-	bool remove = false;
+	pollarray[0].fd = listen_fd;
+	pollarray[0].events = (num_conns < MAX_CONNECTIONS ? POLLIN : 0);
+	pollarray[0].revents = 0;
 
-	for (;;) {
-
-		if (!byte_queue_ensure_min_free_space(queue, 512)) {
-			remove = true;
-			break;
-		}
-
-		string dst = byte_queue_start_write(queue);
-
-		int num = recv(fd, dst.data, dst.size, 0);
-		if (num < 0) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				break;
-			log_perror(LIT("recv"));
-			remove = true;
-			break;
-		}
-		if (num == 0) {
-			remove = true;
-			break;
-		}
-#if SHOW_IO
-		print_bytes(LIT("> "), (string) {dst.data, num});
+#if HTTPS
+	pollarray[1].fd = secure_fd;
+	pollarray[1].events = (num_conns < MAX_CONNECTIONS ? POLLIN : 0);
+	pollarray[1].revents = 0;
+#else
+	pollarray[1].fd = -1;
+	pollarray[1].events = 0;
+	pollarray[1].revents = 0;
 #endif
-		byte_queue_end_write(queue, (size_t) num);
 
-		// Input buffer can't go over 20Mb
-		if (byte_queue_size(queue) > (size_t) INPUT_BUFFER_LIMIT_MB * 1024 * 1024) {
-			remove = true;
-			break;
+	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+
+		Connection *conn = &conns[i];
+
+		int events = 0;
+
+		if (conn->fd != -1) {
+			if (conn->https) {
+#if HTTPS
+				int state = br_ssl_engine_current_state(&conn->https_context.eng);
+				if (state & BR_SSL_SENDREC) events |= POLLOUT;
+				if (state & BR_SSL_RECVREC) events |= POLLIN;
+#endif
+			} else {
+				if (byte_queue_size(&conn->output) > 0)
+					events |= POLLOUT;
+				if (!conn->closing)
+					events |= POLLIN;
+			}
 		}
-	}
 
-	return remove;
+		pollarray[i+2].fd = conn->fd;
+		pollarray[i+2].events = events;
+		pollarray[i+2].revents = 0;
+	}
 }
 
-bool write_to_socket(int fd, ByteQueue *queue)
+void init_connection(Connection *conn, int fd, uint32_t ipaddr, bool https)
 {
-	bool remove = false;
-	for (;;) {
-
-		string src = byte_queue_start_read(queue);
-		if (src.size == 0) break;
-
-		int num = send(fd, src.data, src.size, 0);
-		if (num < 0) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				break;
-			log_perror(LIT("send"));
-			remove = true;
-			break;
+	byte_queue_init(&conn->input);
+	byte_queue_init(&conn->output);
+	conn->fd = fd;
+	conn->ipaddr = ipaddr;
+	conn->closing = false;
+	conn->https = https;
+	conn->served_count = 0;
+	conn->creation_time = now;
+	conn->start_time = now;
+#if HTTPS
+	if (https) {
+		if (pkey->key_type == BR_KEYTYPE_RSA)
+			br_ssl_server_init_full_rsa(&conn->https_context, certs, num_certs, &pkey->key.rsa);
+		else {
+			assert(pkey->key_type == BR_KEYTYPE_EC);
+			unsigned issuer_key_type = BR_KEYTYPE_RSA; // Not sure if this or BR_KEYTYPE_EC
+			br_ssl_server_init_full_ec(&conn->https_context, certs, num_certs, issuer_key_type, &pkey->key.ec);
 		}
-
-#if SHOW_IO
-		print_bytes(LIT("< "), (string) {src.data, num});
-#endif
-		byte_queue_end_read(queue, (size_t) num);
+		br_ssl_engine_set_versions(&conn->https_context.eng, BR_TLS10, BR_TLS12);
+		br_ssl_engine_set_buffer(&conn->https_context.eng, conn->https_buffer, sizeof(conn->https_buffer), 1);
+		br_ssl_server_reset(&conn->https_context);
 	}
-
-	return remove;
+#endif
 }
 
-int create_listening_socket(int port)
+void free_connection(Connection *conn)
 {
-	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (listen_fd < 0) {
-		log_perror(LIT("socket"));
-		return -1;
-	}
+	assert(conn->fd != -1);
+	close(conn->fd);
+	byte_queue_free(&conn->input);
+	byte_queue_free(&conn->output);
+	conn->fd = -1;
+	conn->start_time = -1;
+	conn->closing = false;
+	conn->creation_time = 0;
+}
 
-	if (!set_blocking(listen_fd, false)) {
+bool accept_connection(int listen_fd, bool https)
+{
+	// Look for a connection structure
+	int index = 0;
+	while (index < MAX_CONNECTIONS && conns[index].fd != -1)
+		index++;
+	if (index == MAX_CONNECTIONS)
+		return false; // Stop listening for incoming connections
+
+	struct sockaddr_in accepted_addr;
+	socklen_t accepted_addrlen = sizeof(accepted_addr);
+	int accepted_fd = accept(listen_fd, (struct sockaddr*) &accepted_addr, &accepted_addrlen);
+	if (accepted_fd < 0) {
+		if (errno == EINTR)
+			return true;
+		if (errno == EAGAIN || errno == EWOULDBLOCK)
+			return false;
+		log_perror(LIT("accept"));
+		return false;
+	}
+	uint32_t ipaddr = (uint32_t) accepted_addr.sin_addr.s_addr;
+
+	if (!set_blocking(accepted_fd, false)) {
 		log_perror(LIT("fcntl"));
-		return -1;
+		close(accepted_fd);
+		return true;
 	}
 
-	int one = 1;
-	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
+	Connection *conn = &conns[index];
+	init_connection(conn, accepted_fd, ipaddr, https);
 
-	struct sockaddr_in addr;
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
-		log_perror(LIT("bind"));
-		return -1;
+	assert(num_conns < MAX_CONNECTIONS);
+	num_conns++;
+
+	return true;
+}
+
+// Returns true iff the connection should be dropped
+bool update_connection_http(Connection *conn, struct pollfd *polldata)
+{
+	// POLLIN
+	if ((!conn->closing) && (polldata->revents & (POLLIN | POLLHUP | POLLERR))) {
+		if (read_from_socket(conn->fd, &conn->input))
+			return true;
+		if (respond_to_available_requests(conn))
+			return true;
 	}
 
-	if (listen(listen_fd, 32)) {
-		log_perror(LIT("listen"));
-		return -1;
+	// POLLOUT
+	if (polldata->revents & POLLOUT) {
+		if (write_to_socket(conn->fd, &conn->output))
+			return true;
+		if (byte_queue_size(&conn->output) == 0 && conn->closing)
+			return true;
 	}
 
-	return listen_fd;
+	return false; // Don't close
+}
+
+#if HTTPS
+// Returns true iff the connection should be dropped
+bool update_connection_https(Connection *conn, struct pollfd *polldata)
+{
+	br_ssl_engine_context *cc = &conn->https_context.eng;
+	bool flushed = false;
+
+	for (;;) {
+
+		int state = br_ssl_engine_current_state(cc);
+
+		if (state & BR_SSL_CLOSED) {
+			// Engine is finished, no more I/O (until next reset).
+			int error = br_ssl_engine_last_error(cc);
+			if (error != BR_ERR_OK) {
+				const char *find_error_name(int err, const char **comment);
+				const char *ename = find_error_name(error, NULL);
+				if (ename == NULL) ename = "unknown";
+				log_format("SSL failure: %s\n", ename);
+			}
+
+			return true;
+		}
+
+		if ((state & BR_SSL_SENDREC) && (polldata->revents & POLLOUT)) {
+			// Engine has some bytes to send to the peer
+			size_t len;
+			unsigned char *buf = br_ssl_engine_sendrec_buf(cc, &len);
+			size_t copied = 0;
+			while (copied < len) {
+				int num = send(conn->fd, buf + copied, len - copied, 0);
+				if (num < 0) {
+					if (errno == EINTR)
+						continue;
+					if (errno == EAGAIN || errno == EWOULDBLOCK) {
+						polldata->revents &= ~POLLOUT;
+						break;
+					}
+					log_perror(LIT("send"));
+					return true;
+				}
+				// TODO: Handle num=0
+				copied += (size_t) num;
+			}
+			br_ssl_engine_sendrec_ack(cc, copied);
+			flushed = false;
+		}
+
+		if ((state & BR_SSL_RECVAPP)) {
+			// Engine has obtained some application data from the 
+			// peer, that should be read by the caller.
+			size_t len;
+			unsigned char *buf = br_ssl_engine_recvapp_buf(cc, &len);
+			if (!byte_queue_ensure_min_free_space(&conn->input, len))
+				return true;
+			string dst = byte_queue_start_write(&conn->input);
+			assert(dst.size >= len);
+			memcpy(dst.data, buf, len);
+#if SHOW_IO
+			print_bytes(LIT("> "), (string) {dst.data, len});
+#endif
+			byte_queue_end_write(&conn->input, len);
+			br_ssl_engine_recvapp_ack(cc, len);
+			if (respond_to_available_requests(conn))
+				return true;
+			flushed = false;
+		}
+
+		if ((state & BR_SSL_RECVREC) && (polldata->revents & POLLIN)) {
+			// Engine expects some bytes from the peer
+			size_t len;
+			unsigned char *buf = br_ssl_engine_recvrec_buf(cc, &len);
+			size_t copied = 0;
+			while (copied < len) {
+				int num = recv(conn->fd, buf + copied, len - copied, 0);
+				if (num < 0) {
+					if (errno == EINTR)
+						continue;
+					if (errno == EAGAIN || errno == EWOULDBLOCK) {
+						polldata->revents &= ~POLLIN;
+						break;
+					}
+					log_perror(LIT("recv"));
+					return true;
+				}
+				if (num == 0) {
+					return true;
+				}
+				// TODO: Handle num=0
+				copied += (size_t) num;
+			}
+			br_ssl_engine_recvrec_ack(cc, copied);
+			flushed = false;
+		}
+
+		if ((state & BR_SSL_SENDAPP) && byte_queue_size(&conn->output) > 0) {
+			// Engine may receive application data to send (or flush).
+			size_t len;
+			unsigned char *buf = br_ssl_engine_sendapp_buf(cc, &len);
+			string src = byte_queue_start_read(&conn->output);
+			size_t copy = MIN(len, src.size);
+			memcpy(buf, src.data, copy);
+#if SHOW_IO
+			print_bytes(LIT("< "), (string) {src.data, copy});
+#endif
+			byte_queue_end_read(&conn->output, copy);
+			br_ssl_engine_sendapp_ack(cc, copy);
+			br_ssl_engine_flush(cc, 0); // TODO: Is this the right time to call it?
+			flushed = false;
+		}
+
+		if (flushed) break;
+		br_ssl_engine_flush(cc, 0);
+		flushed = true;
+	}
+
+	int state = br_ssl_engine_current_state(cc);
+	if ((state & BR_SSL_SENDREC) == 0 && conn->closing && byte_queue_size(&conn->output) == 0)
+		return true;
+
+	return false; // Don't remove
+}
+#endif
+
+bool update_connection(Connection *conn, struct pollfd *polldata)
+{
+#if HTTPS
+	if (conn->https)
+		return update_connection_https(conn, polldata);
+#endif
+	return update_connection_http(conn, polldata);
 }
 
 int main(int argc, char **argv)
@@ -1333,54 +1324,14 @@ int main(int argc, char **argv)
 	(void) argc;
 	(void) argv;
 
-	signal(SIGPIPE, SIG_IGN);
-	signal(SIGTERM, handle_sigterm);
-	signal(SIGQUIT, handle_sigterm);
-	signal(SIGINT,  handle_sigterm);
-
-	log_init();
-	log_data(LIT("starting\n"));
-
-	for (int i = 0; i < MAX_CONNECTIONS+2; i++) {
-		pollarray[i].fd = -1;
-		pollarray[i].events = 0;
-		pollarray[i].revents = 0;
-	}
-
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		byte_queue_init(&conns[i].input);
-		byte_queue_init(&conns[i].output);
-	}
-
-	int listen_fd = create_listening_socket(PORT);
-	if (listen_fd < 0) log_fatal(LIT("Couldn't bind\n"));
-	log_format("Listening on port %d\n", PORT);
-	pollarray[0].fd = listen_fd;
-	pollarray[0].events = POLLIN;
-	pollarray[0].revents = 0;
-
-#if HTTPS
-	int secure_fd = create_listening_socket(HTTPS_PORT);
-	if (secure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
-	log_format("Listening on port %d\n", HTTPS_PORT);
-	pollarray[1].fd = secure_fd;
-	pollarray[1].events = POLLIN;
-	pollarray[1].revents = 0;
-
-	size_t num_certs;
-	br_x509_certificate *certs = read_certificates_from_file(LIT(HTTPS_CERT_FILE), &num_certs);
-	if (certs == NULL)
-		log_fatal(LIT("Couldn't load certificates\n"));
-
-	private_key *pkey = read_private_key(LIT(HTTPS_KEY_FILE));
-	if (pkey == NULL)
-		log_fatal(LIT("Couldn't load private key\n"));
-#endif
+	init_globals();
 
 	uint64_t last_log_time = 0;
-	bool pending_accept = false;
 	int timeout =  log_empty() ? -1 : LOG_FLUSH_TIMEOUT_SEC * 1000;
 	while (!stop) {
+
+		struct pollfd pollarray[MAX_CONNECTIONS+2];
+		build_poll_array(pollarray);
 
 		int ret = poll(pollarray, MAX_CONNECTIONS+2, timeout);
 		if (ret < 0) {
@@ -1393,107 +1344,22 @@ int main(int argc, char **argv)
 		now = get_monotonic_time_ms();
 		real_now = get_real_time_ms();
 
-		if ((pollarray[0].revents & ~POLLIN) || (pollarray[1].revents & ~POLLIN)) {
-			// TODO: Handle errors
-			log_fatal(LIT("error occurred on listening sockets"));
-		}
+		if (pollarray[0].revents & POLLIN)
+			while (accept_connection(listen_fd, false));
 
-		if ((pollarray[0].revents & POLLIN) || (pollarray[1].revents & POLLIN) || pending_accept) {
-
-			pending_accept = false;
-
-			int desc_list[] = {
-				listen_fd,
 #if HTTPS
-				secure_fd,
+		if (pollarray[1].revents & POLLIN)
+			while (accept_connection(secure_fd, false));
 #endif
-			};
-
-			for (int i = 0; i < COUNTOF(desc_list); i++) {
-
-				int current_listener_fd = desc_list[i];
-
-				int pollarray_index = (listen_fd == current_listener_fd ? 0 : 1);
-
-				for (;;) {
-
-					// Look for a connection structure
-					int free_index = 2;
-					while (free_index-2 < MAX_CONNECTIONS && pollarray[free_index].fd != -1)
-						free_index++;
-					if (free_index-2 == MAX_CONNECTIONS) {
-						// Stop listening for incoming connections
-						pollarray[pollarray_index].events &= ~POLLIN;
-						pending_accept = true;
-						break;
-					}
-
-					struct sockaddr_in accepted_addr;
-					socklen_t accepted_addrlen = sizeof(accepted_addr);
-					int accepted_fd = accept(current_listener_fd, (struct sockaddr*) &accepted_addr, &accepted_addrlen);
-					if (accepted_fd < 0) {
-						if (errno == EINTR)
-							continue;
-						if (errno == EAGAIN || errno == EWOULDBLOCK)
-							break;
-						log_perror(LIT("accept"));
-						break;
-					}
-
-					if (!set_blocking(accepted_fd, false)) {
-						log_perror(LIT("fcntl"));
-						close(accepted_fd);
-						continue;
-					}
-
-					struct pollfd *polldata = &pollarray[free_index];
-					Connection *conn = &conns[free_index-2];
-
-					polldata->fd = accepted_fd;
-#if HTTPS
-					polldata->events = POLLIN | POLLOUT;
-#else
-					polldata->events = POLLIN;
-#endif
-					polldata->revents = 0;
-
-					byte_queue_init(&conn->input);
-					byte_queue_init(&conn->output);
-					conn->ipaddr = (uint32_t) accepted_addr.sin_addr.s_addr;
-					conn->closing = false;
-					conn->https = false;
-					conn->served_count = 0;
-					conn->creation_time = now;
-					conn->start_time = now;
-					num_conns++;
-#if HTTPS
-					if (current_listener_fd == secure_fd) {
-						if (pkey->key_type == BR_KEYTYPE_RSA)
-							br_ssl_server_init_full_rsa(&conn->https_context, certs, num_certs, &pkey->key.rsa);
-						else {
-							assert(pkey->key_type == BR_KEYTYPE_EC);
-							unsigned issuer_key_type = BR_KEYTYPE_RSA; // Not sure if this or BR_KEYTYPE_EC
-							br_ssl_server_init_full_ec(&conn->https_context, certs, num_certs, issuer_key_type, &pkey->key.ec);
-						}
-						br_ssl_engine_set_versions(&conn->https_context.eng, BR_TLS10, BR_TLS12);
-						br_ssl_engine_set_buffer(&conn->https_context.eng, conn->https_buffer, sizeof(conn->https_buffer), 1);
-						br_ssl_server_reset(&conn->https_context);
-						conn->https = true;
-					}
-#endif
-				} /* accept loop */
-			} /* listener loop */
-		}
 
 		Connection *oldest = NULL;
 
-		for (int i = 2; i-2 < MAX_CONNECTIONS; i++) {
+		for (int i = 0; i < MAX_CONNECTIONS; i++) {
 
-			if (pollarray[i].fd == -1)
-				continue;
+			Connection *conn = &conns[i];
+			if (conn->fd == -1) continue;
 
-			struct pollfd *polldata = &pollarray[i];
-			Connection *conn = &conns[i-2];
+			struct pollfd *polldata = &pollarray[i+2];
 			bool remove = false;
 
 			if (now >= deadline_of(conn)) {
@@ -1517,186 +1383,16 @@ int main(int argc, char **argv)
 							"\r\n"));
 						conn->closing = true;
 						conn->start_time = now;
-						polldata->events &= ~POLLIN;
-						polldata->events |= POLLOUT;
-						polldata->revents |= POLLOUT;
 						log_data(LIT("Request timeout\n"));
 					}
 				}
 			}
 
-			if (conn->https) {
-#if !HTTPS
-				log_fatal(LIT("Unreachable"));
-#else
-				br_ssl_engine_context *cc = &conn->https_context.eng;
-				bool flushed = false;
-				while (!remove) {
-
-					int state = br_ssl_engine_current_state(cc);
-
-					if (state & BR_SSL_CLOSED) {
-						// Engine is finished, no more I/O (until next reset).
-						int error = br_ssl_engine_last_error(cc);
-						if (error != BR_ERR_OK) {
-							const char *find_error_name(int err, const char **comment);
-							const char *ename = find_error_name(error, NULL);
-							if (ename == NULL) ename = "unknown";
-							log_format("SSL failure: %s\n", ename);
-						}
-						remove = true;
-						break;
-					}
-
-					if ((state & BR_SSL_SENDREC) && (polldata->revents & POLLOUT)) {
-						// Engine has some bytes to send to the peer
-						size_t len;
-						unsigned char *buf = br_ssl_engine_sendrec_buf(cc, &len);
-						size_t copied = 0;
-						while (copied < len) {
-							int num = send(polldata->fd, buf + copied, len - copied, 0);
-							if (num < 0) {
-								if (errno == EINTR)
-									continue;
-								if (errno == EAGAIN || errno == EWOULDBLOCK) {
-									polldata->revents &= ~POLLOUT;
-									break;
-								}
-								log_perror(LIT("send"));
-								remove = true;
-								break;
-							}
-							// TODO: Handle num=0
-							copied += (size_t) num;
-						}
-						if (remove) break;
-						br_ssl_engine_sendrec_ack(cc, copied);
-						flushed = false;
-					}
-
-					if ((state & BR_SSL_RECVAPP)) {
-						// Engine has obtained some application data from the 
-						// peer, that should be read by the caller.
-						size_t len;
-						unsigned char *buf = br_ssl_engine_recvapp_buf(cc, &len);
-						if (!byte_queue_ensure_min_free_space(&conn->input, len)) {
-							remove = true;
-							break;
-						}
-						string dst = byte_queue_start_write(&conn->input);
-						assert(dst.size >= len);
-						memcpy(dst.data, buf, len);
-#if SHOW_IO
-						print_bytes(LIT("> "), (string) {dst.data, len});
-#endif
-						byte_queue_end_write(&conn->input, len);
-						br_ssl_engine_recvapp_ack(cc, len);
-						remove = respond_to_available_requests(polldata, conn);
-						if (remove) break;
-						flushed = false;
-					}
-
-					if ((state & BR_SSL_RECVREC) && (polldata->revents & POLLIN)) {
-						// Engine expects some bytes from the peer
-						size_t len;
-						unsigned char *buf = br_ssl_engine_recvrec_buf(cc, &len);
-						size_t copied = 0;
-						while (copied < len) {
-							int num = recv(polldata->fd, buf + copied, len - copied, 0);
-							if (num < 0) {
-								if (errno == EINTR)
-									continue;
-								if (errno == EAGAIN || errno == EWOULDBLOCK) {
-									polldata->revents &= ~POLLIN;
-									break;
-								}
-								log_perror(LIT("recv"));
-								remove = true;
-								break;
-							}
-							if (num == 0) {
-								remove = true;
-								break;
-							}
-							// TODO: Handle num=0
-							copied += (size_t) num;
-						}
-						if (remove) break;
-						br_ssl_engine_recvrec_ack(cc, copied);
-						flushed = false;
-					}
-
-					if ((state & BR_SSL_SENDAPP) && byte_queue_size(&conn->output) > 0) {
-						// Engine may receive application data to send (or flush).
-						size_t len;
-						unsigned char *buf = br_ssl_engine_sendapp_buf(cc, &len);
-						string src = byte_queue_start_read(&conn->output);
-						size_t copy = MIN(len, src.size);
-						memcpy(buf, src.data, copy);
-#if SHOW_IO
-						print_bytes(LIT("< "), (string) {src.data, copy});
-#endif
-						byte_queue_end_read(&conn->output, copy);
-						br_ssl_engine_sendapp_ack(cc, copy);
-						br_ssl_engine_flush(cc, 0); // TODO: Is this the right time to call it?
-						flushed = false;
-					}
-
-					if (flushed)
-						break;
-					br_ssl_engine_flush(cc, 0);
-					flushed = true;
-				}
-
-				if (!remove) {
-					int state = br_ssl_engine_current_state(cc);
-
-
-					polldata->events = 0;
-					if (state & BR_SSL_SENDREC)
-						polldata->events |= POLLOUT;
-					else {
-						if (conn->closing && byte_queue_size(&conn->output) == 0)
-							remove = true;
-					}
-
-					if (state & BR_SSL_RECVREC)
-						polldata->events |= POLLIN;
-				}
-
-#endif /* HTTPS */
-			} else {
-
-				if ((!remove && !conn->closing) && (polldata->revents & (POLLIN | POLLHUP | POLLERR))) {
-
-					remove = read_from_socket(polldata->fd, &conn->input);
-					if (!remove)
-						remove = respond_to_available_requests(polldata, conn);
-				} /* POLLIN */
-
-				if (!remove && (polldata->revents & POLLOUT)) {
-					remove = write_to_socket(polldata->fd, &conn->output);
-					if (!remove && byte_queue_size(&conn->output) == 0) {
-						polldata->events &= ~POLLOUT;
-						if (conn->closing)
-							remove = true;
-					}
-				} /* POLLOUT */
-			}
-
-			polldata->revents = 0;
+			if (!remove)
+				remove = update_connection(conn, polldata);
 
 			if (remove) {
-				close(polldata->fd);
-				polldata->fd = -1;
-				polldata->events = 0;
-				byte_queue_free(&conn->input);
-				byte_queue_free(&conn->output);
-				conn->start_time = -1;
-				conn->closing = false;
-				conn->creation_time = 0;
-				if ((pollarray[0].events & POLLIN) == 0) pollarray[0].events |= POLLIN;
-				if ((pollarray[1].events & POLLIN) == 0) pollarray[1].events |= POLLIN;
+				free_connection(conn);
 				num_conns--;
 			} else {
 				if (oldest == NULL || deadline_of(oldest) > deadline_of(conn)) oldest = conn;
@@ -1711,9 +1407,7 @@ int main(int argc, char **argv)
 		/*
 		 * Calculate the timeout for the next poll
 		 */
-		if (pending_accept && num_conns < MAX_CONNECTIONS)
-			timeout = 0;
-		else if (log_empty()) {
+		if (log_empty()) {
 			if (oldest == NULL)
 				timeout = -1;
 			else {
@@ -1727,26 +1421,9 @@ int main(int argc, char **argv)
 			if (deadline < now) timeout = 0;
 			else timeout = deadline - now;
 		}
-
 	} /* main loop end */
 
-#if HTTPS
-	free_private_key(pkey);
-	free_certificates(certs, num_certs);
-	close(secure_fd);
-#endif
-
-	for (int i = 0; i < MAX_CONNECTIONS+2; i++)
-		if (pollarray[i].fd != -1)
-			close(pollarray[i].fd);
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		byte_queue_free(&conns[i].input);
-		byte_queue_free(&conns[i].output);
-	}
-	log_data(LIT("closing\n"));
-
-	close(listen_fd);
-	log_free();
+	free_globals();
 	return 0;
 }
 
@@ -1780,62 +1457,46 @@ void respond(Request request, ResponseBuilder *b)
 
 #define PATH_SEP '/'
 
-static bool is_print(char c)
-{
-    return c >= 32 && c < 127;
-}
-
-static bool is_pcomp(char c)
-{
-    return c != '/' && c != ':' && is_print(c);
-}
-
-bool streq(string s1, string s2)
-{
-	// TODO: What is s1.data or s2.data is NULL?
-	return s1.size == s2.size && !memcmp(s1.data, s2.data, s1.size);
-}
-
 int split_path_components(string src, string *stack, int limit, bool allow_ddots)
 {
-    size_t cur = 0;
+	size_t cur = 0;
 
-    // Skip the first slash
-    if (cur < src.size && src.data[cur] == PATH_SEP)
-        cur++;
+	// Skip the first slash
+	if (cur < src.size && src.data[cur] == PATH_SEP)
+		cur++;
 
-    int depth = 0;
-    while (cur < src.size) {
+	int depth = 0;
+	while (cur < src.size) {
 
-        if (depth == limit)
-            return -1;
+		if (depth == limit)
+			return -1;
 
-        size_t start = cur;
-        while (cur < src.size && (is_pcomp(src.data[cur]) || (allow_ddots && src.data[cur] == ':')))
-            cur++;
+		size_t start = cur;
+		while (cur < src.size && (is_pcomp(src.data[cur]) || (allow_ddots && src.data[cur] == ':')))
+			cur++;
 
-        string comp = substr(src, start, cur);
+		string comp = substr(src, start, cur);
 
-        if (comp.size == 0)
-            return -1; // We consider paths with empty components invalid
+		if (comp.size == 0)
+			return -1; // We consider paths with empty components invalid
 
-        if (streq(comp, LIT(".."))) {
-            if (depth == 0)
-                return -1;
-            depth--;
-        } else {
-            if (!streq(comp, LIT(".")))
-                stack[depth++] = comp;
-        }
+		if (streq(comp, LIT(".."))) {
+			if (depth == 0)
+				return -1;
+			depth--;
+		} else {
+			if (!streq(comp, LIT(".")))
+				stack[depth++] = comp;
+		}
 
-        if (cur == src.size)
-            break;
+		if (cur == src.size)
+			break;
 
-        if (src.data[cur] != PATH_SEP)
-            return -1;
-        cur++;
-    }
-    return depth;
+		if (src.data[cur] != PATH_SEP)
+			return -1;
+		cur++;
+	}
+	return depth;
 }
 
 /*
@@ -1845,117 +1506,117 @@ int split_path_components(string src, string *stack, int limit, bool allow_ddots
  */
 size_t sanitize_path(string src, char *mem, size_t max)
 {
-    #define MAX_COMPS 64
+	#define MAX_COMPS 64
 
-    string stack[MAX_COMPS];
-    int depth;
+	string stack[MAX_COMPS];
+	int depth;
 
-    depth = split_path_components(src, stack, MAX_COMPS, false);
-    if (depth < 0)
-        return -1;
+	depth = split_path_components(src, stack, MAX_COMPS, false);
+	if (depth < 0)
+		return -1;
 
-    /*
-     * Count how many output bytes are required
-     */
-    size_t req = depth;
-    for (int i = 0; i < depth; i++)
-        req += stack[i].size;
-    if (req >= max)
-        return -1; // Buffer too small
+	/*
+	 * Count how many output bytes are required
+	 */
+	size_t req = depth;
+	for (int i = 0; i < depth; i++)
+		req += stack[i].size;
+	if (req >= max)
+		return -1; // Buffer too small
 
-    /*
-     * Copy the sanitized path into the output
-     * buffer.
-     */
-    size_t n = 0;
-    for (int i = 0; i < depth; i++) {
-        mem[n++] = PATH_SEP;
-        memcpy(mem + n, stack[i].data, stack[i].size);
-        n += stack[i].size;
-    }
-    mem[n] = '\0';
-    return n;
+	/*
+	 * Copy the sanitized path into the output
+	 * buffer.
+	 */
+	size_t n = 0;
+	for (int i = 0; i < depth; i++) {
+		mem[n++] = PATH_SEP;
+		memcpy(mem + n, stack[i].data, stack[i].size);
+		n += stack[i].size;
+	}
+	mem[n] = '\0';
+	return n;
 }
 
 int match_path_format(string path, char *fmt, ...)
 {
-    #define LIMIT 32
-    string p_stack[LIMIT];
-    string f_stack[LIMIT];
-    int p_depth;
-    int f_depth;
+	#define LIMIT 32
+	string p_stack[LIMIT];
+	string f_stack[LIMIT];
+	int p_depth;
+	int f_depth;
 
-    p_depth = split_path_components(path,     p_stack, LIMIT, false);
-    f_depth = split_path_components(LIT(fmt), f_stack, LIMIT, true);
+	p_depth = split_path_components(path,     p_stack, LIMIT, false);
+	f_depth = split_path_components(LIT(fmt), f_stack, LIMIT, true);
 
-    if (p_depth < 0 || f_depth < 0)
-        return -1; // Error
+	if (p_depth < 0 || f_depth < 0)
+		return -1; // Error
 
-    if (p_depth != f_depth)
-        return 1; // No match
+	if (p_depth != f_depth)
+		return 1; // No match
 
-    va_list args;
-    va_start(args, fmt);
+	va_list args;
+	va_start(args, fmt);
 
-    for (int i = 0; i < f_depth; i++) {
+	for (int i = 0; i < f_depth; i++) {
 
-        assert(f_stack[i].size > 0);
-        assert(p_stack[i].size > 0);
+		assert(f_stack[i].size > 0);
+		assert(p_stack[i].size > 0);
 
-        if (f_stack[i].data[0] == ':') {
-            if (f_stack[i].size != 2) {
+		if (f_stack[i].data[0] == ':') {
+			if (f_stack[i].size != 2) {
 				va_end(args);
-                return -1; // Invalid format
+				return -1; // Invalid format
 			}
-            switch (f_stack[i].data[1]) {
-                
-                case 'l':
-                {
-                    string *sl = va_arg(args, string*);
-                    *sl = p_stack[i];
-                }
-                break;
-                
-                case 'n':
-                {
-                    uint32_t n = 0;
-                    size_t cur = 0;
-                    while (cur < p_stack[i].size && is_digit(p_stack[i].data[cur])) {
-                        int d = p_stack[i].data[cur] - '0';
-                        if (n > (UINT32_MAX - d) / 10) {
+			switch (f_stack[i].data[1]) {
+				
+				case 'l':
+				{
+					string *sl = va_arg(args, string*);
+					*sl = p_stack[i];
+				}
+				break;
+				
+				case 'n':
+				{
+					uint32_t n = 0;
+					size_t cur = 0;
+					while (cur < p_stack[i].size && is_digit(p_stack[i].data[cur])) {
+						int d = p_stack[i].data[cur] - '0';
+						if (n > (UINT32_MAX - d) / 10) {
 							va_end(args);
-                            return -1; // Overflow
+							return -1; // Overflow
 						}
-                        n = n * 10 + d;
-                        cur++;
-                    }
-                    if (cur != p_stack[i].size) {
-						va_end(args);
-                        return -1; // Component isn't a number
+						n = n * 10 + d;
+						cur++;
 					}
-                    uint32_t *p = va_arg(args, uint32_t*);
-                    *p = n;
-                }
-                break;
+					if (cur != p_stack[i].size) {
+						va_end(args);
+						return -1; // Component isn't a number
+					}
+					uint32_t *p = va_arg(args, uint32_t*);
+					*p = n;
+				}
+				break;
 
-                default:
+				default:
 				va_end(args);
-                return -1; // Invalid formt
-            }
-        } else {
-            if (f_stack[i].size != p_stack[i].size) {
-				va_end(args);
-                return 1; // No match
+				return -1; // Invalid formt
 			}
-            if (memcmp(f_stack[i].data, p_stack[i].data, f_stack[i].size)) {
+		} else {
+			if (f_stack[i].size != p_stack[i].size) {
 				va_end(args);
-                return 1;
+				return 1; // No match
 			}
-        }
-    }
+			if (memcmp(f_stack[i].data, p_stack[i].data, f_stack[i].size)) {
+				va_end(args);
+				return 1;
+			}
+		}
+	}
 
-    va_end(args);
-    return 0;
+	va_end(args);
+	return 0;
 }
 
 struct {
@@ -2116,13 +1777,6 @@ bool serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot,
 ///////////////////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////////////////
 
-int      log_last_file_index = 0;
-int      log_fd = -1;
-char    *log_buffer = NULL;
-size_t   log_buffer_used = 0;
-bool     log_failed = false;
-size_t   log_total_size = 0;
-
 void log_choose_file_name(char *dst, size_t max, bool startup)
 {
 	size_t prev_size = -1;
@@ -2263,15 +1917,17 @@ void log_flush(void)
 	 */
 	struct stat buf;
 	if (fstat(log_fd, &buf)) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		fprintf(stderr, "log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
+
 	if (buf.st_size + log_buffer_used >= LOG_FILE_LIMIT) {
+
 		char name[1<<12];
 		log_choose_file_name(name, SIZEOF(name), false);
 		if (log_failed) return; 
-		
+
 		close(log_fd);
 		log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 		if (log_fd < 0) {
@@ -2296,6 +1952,7 @@ void log_flush(void)
 			log_failed = true;
 			return;
 		}
+
 		if (num == 0) {
 			zeros++;
 			if (zeros == 1000) {
@@ -2372,7 +2029,7 @@ void log_data(string str)
 	if (log_failed)
 		return;
 
-    if (str.size > LOG_BUFFER_SIZE)
+	if (str.size > LOG_BUFFER_SIZE)
 		str = LIT("Log message was too long to log");
 
 	if (str.size > LOG_BUFFER_SIZE - log_buffer_used) {
@@ -3217,6 +2874,124 @@ void free_private_key(private_key *sk)
 
 #endif /* HTTPS */
 
+uint64_t timespec_to_ms(struct timespec ts)
+{
+	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000)
+		log_fatal(LIT("Time overflow\n"));
+	uint64_t ms = ts.tv_sec * 1000;
+
+	uint64_t nsec_part = ts.tv_nsec / 1000000;
+	if (ms > UINT64_MAX - nsec_part)
+		log_fatal(LIT("Time overflow\n"));
+	ms += nsec_part;
+	return ms;
+}
+
+uint64_t get_monotonic_time_ms(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
+	return timespec_to_ms(ts);
+}
+
+uint64_t get_real_time_ms(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_REALTIME, &ts);
+	if (ret) log_fatal(LIT("Couldn't read real time\n"));
+	return timespec_to_ms(ts);
+}
+
+void *mymalloc(size_t num)
+{
+	return malloc(num);
+}
+
+bool string_match_case_insensitive(string x, string y)
+{
+	if (x.size != y.size)
+		return false;
+	for (size_t i = 0; i < x.size; i++)
+		if (to_lower(x.data[i]) != to_lower(y.data[i]))
+			return false;
+	return true;
+}
+
+char to_lower(char c)
+{
+	if (c >= 'A' && c <= 'Z')
+		return c - 'A' + 'a';
+	else
+		return c;
+}
+
+string trim(string s)
+{
+	size_t cur = 0;
+	while (cur < s.size && is_space(s.data[cur]))
+		cur++;
+
+	if (cur == s.size) {
+		s.data = "";
+		s.size = 0;
+	} else {
+		s.data += cur;
+		s.size -= cur;
+		while (is_space(s.data[s.size-1]))
+			s.size--;
+	}
+	return s;
+}
+
+string substr(string str, size_t start, size_t end)
+{
+	return (string) {
+		.data = str.data + start,
+		.size = end - start,
+	};
+}
+
+bool is_digit(char c)
+{
+	return c >= '0' && c <= '9';
+}
+
+bool is_space(char c)
+{
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+bool is_print(char c)
+{
+	return c >= 32 && c < 127;
+}
+
+bool is_pcomp(char c)
+{
+	return c != '/' && c != ':' && is_print(c);
+}
+
+bool streq(string s1, string s2)
+{
+	// TODO: What is s1.data or s2.data is NULL?
+	return s1.size == s2.size && !memcmp(s1.data, s2.data, s1.size);
+}
+
+bool startswith(string prefix, string str)
+{
+	if (prefix.size > str.size)
+		return false;
+	// TODO: What is prefix.data==NULL or str.data==NULL?
+	return !memcmp(prefix.data, str.data, prefix.size);
+}
+
+bool endswith(string suffix, string name)
+{
+	char *tail = name.data + (name.size - suffix.size);
+	return suffix.size <= name.size && !memcmp(tail, suffix.data, suffix.size);
+}
+
 bool load_file_contents(string file, string *out)
 {
 	char copy[1<<12];
@@ -3265,5 +3040,268 @@ bool load_file_contents(string file, string *out)
 	close(fd);
 
 	*out = (string) {str, copied};
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+void byte_queue_init(ByteQueue *q)
+{
+	q->data = NULL;
+	q->head = 0;
+	q->size = 0;
+	q->capacity = 0;
+}
+
+void byte_queue_free(ByteQueue *q)
+{
+	free(q->data);
+	byte_queue_init(q);
+}
+
+bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
+{
+	size_t total_free_space = q->capacity - q->size;
+	size_t free_space_after_data = q->capacity - q->size - q->head;
+
+	if (free_space_after_data < num) {
+		if (total_free_space < num) {
+			// Resize required
+
+			size_t capacity = 2 * q->capacity;
+			if (capacity - q->size < num) capacity = q->size + num;
+
+			char *data = mymalloc(capacity);
+			if (!data) return false;
+
+			if (q->size > 0)
+				memcpy(data, q->data + q->head, q->size);
+
+			free(q->data);
+			q->data = data;
+			q->capacity = capacity;
+
+		} else {
+			// Move required
+			memmove(q->data, q->data + q->head, q->size);
+			q->head = 0;
+		}
+	}
+
+	return true;
+}
+
+string byte_queue_start_write(ByteQueue *q)
+{
+	if (q->data == NULL)
+		return NULLSTR;
+	return (string) {
+		.data = q->data     + q->head + q->size,
+		.size = q->capacity - q->head - q->size,
+	};
+}
+
+void byte_queue_end_write(ByteQueue *q, size_t num)
+{
+	q->size += num;
+}
+
+string byte_queue_start_read(ByteQueue *q)
+{
+	if (q->data == NULL)
+		return NULLSTR;
+	return (string) {
+		.data = q->data + q->head,
+		.size = q->size,
+	};
+}
+
+size_t byte_queue_size(ByteQueue *q)
+{
+	return q->size;
+}
+
+void byte_queue_end_read(ByteQueue *q, size_t num)
+{
+	q->head += num;
+	q->size -= num;
+}
+
+bool byte_queue_write(ByteQueue *q, string src)
+{
+	if (!byte_queue_ensure_min_free_space(q, src.size))
+		return false;
+	string dst = byte_queue_start_write(q);
+	assert(dst.size >= src.size);
+	memcpy(dst.data, src.data, src.size);
+	byte_queue_end_write(q, src.size);
+	return true;
+}
+
+void byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len)
+{
+	// TODO: Safety checks
+	memcpy(q->data + q->head + offset, src, len);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////
+
+void print_bytes(string prefix, string str)
+{
+	char  *src = str.data;
+	size_t len = str.size;
+
+	bool line_start = true;
+
+	size_t i = 0;
+	while (i < len) {
+
+		size_t substr_offset = i;
+		while (i < len && src[i] != '\r' && src[i] != '\n')
+			i++;
+		size_t substr_length = i - substr_offset;
+
+		if (line_start) {
+			log_data(prefix);
+			line_start = false;
+		}
+
+		log_data((string) { src + substr_offset, substr_length });
+
+		if (i < len) {
+			if (src[i] == '\r')
+				log_data(LIT("\\r"));
+			else {
+				log_data(LIT("\\n\n"));
+				line_start = true;
+			}
+			i++;
+		}
+	}
+
+	if (!line_start)
+		log_data(LIT("\n"));
+}
+
+bool read_from_socket(int fd, ByteQueue *queue)
+{
+	bool remove = false;
+
+	for (;;) {
+
+		if (!byte_queue_ensure_min_free_space(queue, 512)) {
+			remove = true;
+			break;
+		}
+
+		string dst = byte_queue_start_write(queue);
+
+		int num = recv(fd, dst.data, dst.size, 0);
+		if (num < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+			log_perror(LIT("recv"));
+			remove = true;
+			break;
+		}
+		if (num == 0) {
+			remove = true;
+			break;
+		}
+#if SHOW_IO
+		print_bytes(LIT("> "), (string) {dst.data, num});
+#endif
+		byte_queue_end_write(queue, (size_t) num);
+
+		// Input buffer can't go over 20Mb
+		if (byte_queue_size(queue) > (size_t) INPUT_BUFFER_LIMIT_MB * 1024 * 1024) {
+			remove = true;
+			break;
+		}
+	}
+
+	return remove;
+}
+
+bool write_to_socket(int fd, ByteQueue *queue)
+{
+	bool remove = false;
+	for (;;) {
+
+		string src = byte_queue_start_read(queue);
+		if (src.size == 0) break;
+
+		int num = send(fd, src.data, src.size, 0);
+		if (num < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+			log_perror(LIT("send"));
+			remove = true;
+			break;
+		}
+
+#if SHOW_IO
+		print_bytes(LIT("< "), (string) {src.data, num});
+#endif
+		byte_queue_end_read(queue, (size_t) num);
+	}
+
+	return remove;
+}
+
+int create_listening_socket(int port)
+{
+	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (listen_fd < 0) {
+		log_perror(LIT("socket"));
+		return -1;
+	}
+
+	if (!set_blocking(listen_fd, false)) {
+		log_perror(LIT("fcntl"));
+		return -1;
+	}
+
+	int one = 1;
+	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
+
+	struct sockaddr_in addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
+		log_perror(LIT("bind"));
+		return -1;
+	}
+
+	if (listen(listen_fd, 32)) {
+		log_perror(LIT("listen"));
+		return -1;
+	}
+
+	return listen_fd;
+}
+
+bool set_blocking(int fd, bool blocking)
+{
+	int flags = fcntl(fd, F_GETFL, 0);
+
+	if (flags == -1)
+		return false;
+
+	if (blocking) flags &= ~O_NONBLOCK;
+	else          flags |= O_NONBLOCK;
+
+	if (fcntl(fd, F_SETFL, flags))
+		return false;
+
 	return true;
 }
