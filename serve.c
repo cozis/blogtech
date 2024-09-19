@@ -52,7 +52,7 @@
 #define HTTPS_CERT_FILE "cert.pem"
 
 #define ACCESS_LOG 1
-#define SHOW_IO 1
+#define SHOW_IO 0
 #define SHOW_REQUESTS 0
 #define REQUEST_TIMEOUT_SEC 5
 #define CLOSING_TIMEOUT_SEC 2
