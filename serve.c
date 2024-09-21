@@ -52,16 +52,16 @@
 #define HTTPS_KEY_FILE  "key.pem"
 #define HTTPS_CERT_FILE "cert.pem"
 
-#define EOPALLOC 0
-#define PROFILE 0
-#define ACCESS_LOG 1
-#define SHOW_IO 0
+#define EOPALLOC      0
+#define PROFILE       0
+#define ACCESS_LOG    1
+#define SHOW_IO       0
 #define SHOW_REQUESTS 0
-#define REQUEST_TIMEOUT_SEC 5
-#define CLOSING_TIMEOUT_SEC 2
+#define REQUEST_TIMEOUT_SEC     5
+#define CLOSING_TIMEOUT_SEC     2
 #define CONNECTION_TIMEOUT_SEC 60
-#define LOG_FLUSH_TIMEOUT_SEC 3
-#define INPUT_BUFFER_LIMIT_MB 1
+#define LOG_FLUSH_TIMEOUT_SEC   3
+#define INPUT_BUFFER_LIMIT_MB   1
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// Optional Headers                                                                        ///
@@ -285,7 +285,7 @@ int num_conns = 0;
 uint64_t now;
 uint64_t real_now;
 
-int listen_fd;
+int insecure_fd;
 int secure_fd;
 
 #if HTTPS
@@ -332,8 +332,8 @@ void init_globals(void)
 		byte_queue_init(&conns[i].output);
 	}
 
-	listen_fd = create_listening_socket(PORT);
-	if (listen_fd < 0) log_fatal(LIT("Couldn't bind\n"));
+	insecure_fd = create_listening_socket(PORT);
+	if (insecure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
 	log_format("Listening on port %d\n", PORT);
 
 	DEBUG("HTTP started\n");
@@ -370,7 +370,7 @@ void free_globals(void)
 	close(secure_fd);
 #endif
 
-	close(listen_fd);
+	close(insecure_fd);
 
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
 		if (conns[i].fd != -1) {
@@ -381,7 +381,6 @@ void free_globals(void)
 	}
 	log_data(LIT("closing\n"));
 
-	close(listen_fd);
 	log_free();
 }
 
@@ -1095,7 +1094,7 @@ bool respond_to_available_requests(Connection *conn)
 
 void build_poll_array(struct pollfd pollarray[static MAX_CONNECTIONS+2])
 {
-	pollarray[0].fd = listen_fd;
+	pollarray[0].fd = insecure_fd;
 	pollarray[0].events = (num_conns < MAX_CONNECTIONS ? POLLIN : 0);
 	pollarray[0].revents = 0;
 
@@ -1404,7 +1403,7 @@ int main(int argc, char **argv)
 		real_now = get_real_time_ms();
 
 		if (pollarray[0].revents & POLLIN)
-			while (accept_connection(listen_fd, false));
+			while (accept_connection(insecure_fd, false));
 
 #if HTTPS
 		if (pollarray[1].revents & POLLIN)
@@ -3240,7 +3239,7 @@ void *mymalloc(size_t num)
 		log_perror(LIT("mprotect"));
 		exit(-1);
 	}
-	
+
 	return addr;
 }
 

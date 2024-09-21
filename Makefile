@@ -3,7 +3,7 @@
 HTTPS ?= 0
 
 COMMON_FLAGS   = -Wall -Wextra -DHTTPS=$(HTTPS)
-DEBUG_FLAGS    = -O0 -ggdb
+DEBUG_FLAGS    = -O0 -ggdb -fsanitize=address,undefined
 COVERAGE_FLAGS =  -fprofile-arcs -ftest-coverage -lgcov
 RELEASE_FLAGS  = -O2 -DNDEBUG -DRELEASE
 
