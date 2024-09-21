@@ -16,6 +16,7 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -51,6 +52,7 @@
 #define HTTPS_KEY_FILE  "key.pem"
 #define HTTPS_CERT_FILE "cert.pem"
 
+#define EOPALLOC 0
 #define PROFILE 0
 #define ACCESS_LOG 1
 #define SHOW_IO 0
@@ -84,13 +86,13 @@ typedef struct {
 	size_t size;
 } string;
 
-#define LIT(S) (string) {.data=(S), .size=sizeof(S)-1}
-#define STR(S) (string) {.data=(S), .size=strlen(S)}
+#define LIT(S) ((string) {.data=(S), .size=sizeof(S)-1})
+#define STR(S) ((string) {.data=(S), .size=strlen(S)})
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
-#define MAX(X, Y) ((X) < (Y) ? (X) : (Y))
+#define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
 #define SIZEOF(X) ((ssize_t) sizeof(X))
 #define COUNTOF(X) (SIZEOF(X) / SIZEOF((X)[0]))
-#define NULLSTR (string) {.data=NULL, .size=0}
+#define NULLSTR ((string) {.data=NULL, .size=0})
 
 #ifndef NDEBUG
 #define DEBUG(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
@@ -102,6 +104,28 @@ typedef struct {
 #define TIME(label) for (uint64_t start__ = __rdtsc(), done__ = 0; !done__; timed_scope_result(__COUNTER__, __rdtsc() - start__, LIT(label)), (done__=1))
 #else
 #define TIME(...)
+#endif
+
+#if HTTPS
+typedef struct {
+	int type;  // BR_KEYTYPE_RSA or BR_KEYTYPE_EC
+	union {
+		br_rsa_private_key rsa;
+		br_ec_private_key ec;
+	};
+} PrivateKey;
+
+typedef struct {
+	br_x509_certificate *items;
+	int count;
+	int capacity;
+} CertArray;
+
+typedef struct {
+	int code;
+	string name;
+	string comment;
+} BearSSLErrorInfo;
 #endif
 
 enum {
@@ -219,43 +243,35 @@ void timed_scope_result(int scope_index, uint64_t delta_cycles, string label);
 #endif
 
 #if HTTPS
-
-// Aggregate type for a private key.
-typedef struct {
-	int key_type;  // BR_KEYTYPE_RSA or BR_KEYTYPE_EC
-	union {
-		br_rsa_private_key rsa;
-		br_ec_private_key ec;
-	} key;
-} private_key;
-
-br_x509_certificate *read_certificates_from_file(string file, size_t *num);
-void                 free_certificates(br_x509_certificate *certs, size_t num);
-private_key *read_private_key(string file);
-void         free_private_key(private_key *sk);
+bool load_private_key_from_file(string file, PrivateKey *pkey);
+void free_private_key(PrivateKey *pkey);
+bool load_certs_from_file(string file, CertArray *array);
+void free_certs(CertArray *array);
+BearSSLErrorInfo get_bearssl_error_info(int code);
 #endif
 
-char to_lower(char c);
-bool is_print(char c);
-bool is_pcomp(char c);
-bool is_digit(char c);
-bool is_space(char c);
+char   to_lower(char c);
+bool   is_print(char c);
+bool   is_pcomp(char c);
+bool   is_digit(char c);
+bool   is_space(char c);
 string trim(string s);
 string substr(string str, size_t start, size_t end);
-bool streq(string s1, string s2);
-bool string_match_case_insensitive(string x, string y);
-bool endswith(string suffix, string name);
-bool startswith(string prefix, string str);
-void print_bytes(string prefix, string str);
-void *mymalloc(size_t num);
+bool   streq(string s1, string s2);
+bool   string_match_case_insensitive(string x, string y);
+bool   endswith(string suffix, string name);
+bool   startswith(string prefix, string str);
+void   print_bytes(string prefix, string str);
+void  *mymalloc(size_t num);
+void   myfree(void *ptr, size_t num);
 uint64_t get_real_time_ms(void);
 uint64_t get_monotonic_time_ms(void);
 uint64_t get_monotonic_time_ns(void);
-bool load_file_contents(string file, string *out);
-bool set_blocking(int fd, bool blocking);
-bool read_from_socket(int fd, ByteQueue *queue);
-bool write_to_socket(int fd, ByteQueue *queue);
-int create_listening_socket(int port);
+bool   load_file_contents(string file, string *out);
+bool   set_blocking(int fd, bool blocking);
+bool   read_from_socket(int fd, ByteQueue *queue);
+bool   write_to_socket(int fd, ByteQueue *queue);
+int    create_listening_socket(int port);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// GLOBALS                                                                                 ///
@@ -273,9 +289,8 @@ int listen_fd;
 int secure_fd;
 
 #if HTTPS
-private_key         *pkey;
-br_x509_certificate *certs;
-size_t num_certs;
+PrivateKey pkey;
+CertArray certs;
 #endif
 
 int    log_last_file_index = 0;
@@ -302,6 +317,8 @@ void init_globals(void)
 	signal(SIGQUIT, handle_sigterm);
 	signal(SIGINT,  handle_sigterm);
 
+	DEBUG("Signals configured\n");
+
 	log_init();
 	log_data(LIT("starting\n"));
 
@@ -319,18 +336,22 @@ void init_globals(void)
 	if (listen_fd < 0) log_fatal(LIT("Couldn't bind\n"));
 	log_format("Listening on port %d\n", PORT);
 
+	DEBUG("HTTP started\n");
+
 #if HTTPS
 	secure_fd = create_listening_socket(HTTPS_PORT);
 	if (secure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
 	log_format("Listening on port %d\n", HTTPS_PORT);
 
-	certs = read_certificates_from_file(LIT(HTTPS_CERT_FILE), &num_certs);
-	if (certs == NULL)
+	if (!load_certs_from_file(LIT(HTTPS_CERT_FILE), &certs))
 		log_fatal(LIT("Couldn't load certificates\n"));
+	DEBUG("Certificates loaded\n");
 
-	pkey = read_private_key(LIT(HTTPS_KEY_FILE));
-	if (pkey == NULL)
+	if (!load_private_key_from_file(LIT(HTTPS_KEY_FILE), &pkey))
 		log_fatal(LIT("Couldn't load private key\n"));
+	DEBUG("Private key loaded\n");
+
+	DEBUG("HTTPS started\n");
 #else
 	secure_fd = -1;
 #endif
@@ -344,8 +365,8 @@ void free_globals(void)
 #endif
 
 #if HTTPS
-	free_private_key(pkey);
-	free_certificates(certs, num_certs);
+	free_private_key(&pkey);
+	free_certs(&certs);
 	close(secure_fd);
 #endif
 
@@ -616,32 +637,32 @@ string get_status_string(int status)
 
 size_t parse_content_length(string s)
 {
-    char  *src = s.data;
-    size_t len = s.size;
+	char  *src = s.data;
+	size_t len = s.size;
 
-    size_t cur = 0;
-    while (cur < len && is_space(src[cur]))
-        cur++;
-    
-    if (cur == len || !is_digit(src[cur]))
-        return -1;
+	size_t cur = 0;
+	while (cur < len && is_space(src[cur]))
+		cur++;
 
-    size_t x = 0;
-    do {
-        int d = src[cur] - '0';
-        if (x > (SIZE_MAX - d) / 10)
-            return -1;
-        x = x * 10 + d;
-        cur++;
-    } while (cur < len && is_digit(src[cur]));
+	if (cur == len || !is_digit(src[cur]))
+		return -1;
 
-    while (cur < len && is_space(src[cur]))
-        cur++;
-    
-    if (cur != len)
-        return -1;
-    
-    return x;
+	size_t x = 0;
+	do {
+		int d = src[cur] - '0';
+		if (x > (SIZE_MAX - d) / 10)
+			return -1;
+		x = x * 10 + d;
+		cur++;
+	} while (cur < len && is_digit(src[cur]));
+
+	while (cur < len && is_space(src[cur]))
+		cur++;
+
+	if (cur != len)
+		return -1;
+
+	return x;
 }
 
 int find_and_parse_transfer_encoding(Request *request)
@@ -722,7 +743,7 @@ void status_line(ResponseBuilder *b, int status)
 		char buf[1<<10];
 		string status_string = get_status_string(status);
 		int num = snprintf(buf, sizeof(buf), "HTTP/1.1 %d %.*s\r\n", status, (int) status_string.size, status_string.data);
-		assert(num > 0);
+		assert(num > 0 && num < SIZEOF(buf));
 		if (!byte_queue_write(&b->conn->output, (string) {buf, num}))
 			b->failed = true;
 	}
@@ -1128,12 +1149,12 @@ void init_connection(Connection *conn, int fd, uint32_t ipaddr, bool https)
 	conn->start_time = now;
 #if HTTPS
 	if (https) {
-		if (pkey->key_type == BR_KEYTYPE_RSA)
-			br_ssl_server_init_full_rsa(&conn->https_context, certs, num_certs, &pkey->key.rsa);
+		if (pkey.type == BR_KEYTYPE_RSA)
+			br_ssl_server_init_full_rsa(&conn->https_context, certs.items, certs.count, &pkey.rsa);
 		else {
-			assert(pkey->key_type == BR_KEYTYPE_EC);
+			assert(pkey.type == BR_KEYTYPE_EC);
 			unsigned issuer_key_type = BR_KEYTYPE_RSA; // Not sure if this or BR_KEYTYPE_EC
-			br_ssl_server_init_full_ec(&conn->https_context, certs, num_certs, issuer_key_type, &pkey->key.ec);
+			br_ssl_server_init_full_ec(&conn->https_context, certs.items, certs.count, issuer_key_type, &pkey.ec);
 		}
 		br_ssl_engine_set_versions(&conn->https_context.eng, BR_TLS10, BR_TLS12);
 		br_ssl_engine_set_buffer(&conn->https_context.eng, conn->https_buffer, sizeof(conn->https_buffer), 1);
@@ -1230,10 +1251,10 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			// Engine is finished, no more I/O (until next reset).
 			int error = br_ssl_engine_last_error(cc);
 			if (error != BR_ERR_OK) {
-				const char *find_error_name(int err, const char **comment);
-				const char *ename = find_error_name(error, NULL);
-				if (ename == NULL) ename = "unknown";
-				log_format("SSL failure: %s\n", ename);
+				BearSSLErrorInfo error_info = get_bearssl_error_info(error);
+				log_format("SSL failure: %.*s (%.*s)\n",
+					(int) error_info.name.size, error_info.name.data,
+					(int) error_info.comment.size, error_info.comment.data);
 			}
 
 			return true;
@@ -1361,6 +1382,8 @@ int main(int argc, char **argv)
 	(void) argv;
 
 	init_globals();
+
+	DEBUG("Globals initialized\n");
 
 	uint64_t last_log_time = 0;
 	int timeout =  log_empty() ? -1 : LOG_FLUSH_TIMEOUT_SEC * 1000;
@@ -1930,7 +1953,7 @@ void log_free(void)
 		log_flush();
 		if (log_fd > -1)
 			close(log_fd);
-		free(log_buffer);
+		myfree(log_buffer, LOG_BUFFER_SIZE);
 		log_fd = -1;
 		log_buffer = NULL;
 		log_buffer_used = 0;
@@ -2086,422 +2109,93 @@ void log_perror(string str)
 
 #if HTTPS
 
-#define VECTOR(type)   struct { \
-		type *buf; \
-		size_t ptr, len; \
-	}
-
-#define VEC_INIT   { 0, 0, 0 }
-
-#define VEC_CLEAR(vec)   do { \
-		free((vec).buf); \
-		(vec).buf = NULL; \
-		(vec).ptr = 0; \
-		(vec).len = 0; \
-	} while (0)
-
-#define VEC_CLEAREXT(vec, fun)   do { \
-		size_t vec_tmp; \
-		for (vec_tmp = 0; vec_tmp < (vec).ptr; vec_tmp ++) { \
-			(fun)(&(vec).buf[vec_tmp]); \
-		} \
-		VEC_CLEAR(vec); \
-	} while (0)
-
-#define VEC_ADD(vec, x)   do { \
-		(vec).buf = vector_expand((vec).buf, sizeof *((vec).buf), \
-			&(vec).ptr, &(vec).len, 1); \
-		(vec).buf[(vec).ptr ++] = (x); \
-	} while (0)
-
-#define VEC_ADDMANY(vec, xp, num)   do { \
-		size_t vec_num = (num); \
-		(vec).buf = vector_expand((vec).buf, sizeof *((vec).buf), \
-			&(vec).ptr, &(vec).len, vec_num); \
-		memcpy((vec).buf + (vec).ptr, \
-			(xp), vec_num * sizeof *((vec).buf)); \
-		(vec).ptr += vec_num; \
-	} while (0)
-
-#define VEC_ELT(vec, idx)   ((vec).buf[idx])
-
-#define VEC_LEN(vec)   ((vec).ptr)
-
-#define VEC_TOARRAY(vec)    xblobdup((vec).buf, sizeof *((vec).buf) * (vec).ptr)
-
-typedef VECTOR(unsigned char) bvector;
-
-// Type for a named blob (the 'name' is a normalised PEM header name).
-typedef struct {
-	char *name;
-	unsigned char *data;
-	size_t data_len;
-} pem_object;
-
-static struct {
-	int err;
-	const char *name;
-	const char *comment;
-} errors[] = {
-	{
-		BR_ERR_BAD_PARAM,
-		"BR_ERR_BAD_PARAM",
-		"Caller-provided parameter is incorrect."
-	}, {
-		BR_ERR_BAD_STATE,
-		"BR_ERR_BAD_STATE",
-		"Operation requested by the caller cannot be applied with"
-		" the current context state (e.g. reading data while"
-		" outgoing data is waiting to be sent)."
-	}, {
-		BR_ERR_UNSUPPORTED_VERSION,
-		"BR_ERR_UNSUPPORTED_VERSION",
-		"Incoming protocol or record version is unsupported."
-	}, {
-		BR_ERR_BAD_VERSION,
-		"BR_ERR_BAD_VERSION",
-		"Incoming record version does not match the expected version."
-	}, {
-		BR_ERR_BAD_LENGTH,
-		"BR_ERR_BAD_LENGTH",
-		"Incoming record length is invalid."
-	}, {
-		BR_ERR_TOO_LARGE,
-		"BR_ERR_TOO_LARGE",
-		"Incoming record is too large to be processed, or buffer"
-		" is too small for the handshake message to send."
-	}, {
-		BR_ERR_BAD_MAC,
-		"BR_ERR_BAD_MAC",
-		"Decryption found an invalid padding, or the record MAC is"
-		" not correct."
-	}, {
-		BR_ERR_NO_RANDOM,
-		"BR_ERR_NO_RANDOM",
-		"No initial entropy was provided, and none can be obtained"
-		" from the OS."
-	}, {
-		BR_ERR_UNKNOWN_TYPE,
-		"BR_ERR_UNKNOWN_TYPE",
-		"Incoming record type is unknown."
-	}, {
-		BR_ERR_UNEXPECTED,
-		"BR_ERR_UNEXPECTED",
-		"Incoming record or message has wrong type with regards to"
-		" the current engine state."
-	}, {
-		BR_ERR_BAD_CCS,
-		"BR_ERR_BAD_CCS",
-		"ChangeCipherSpec message from the peer has invalid contents."
-	}, {
-		BR_ERR_BAD_ALERT,
-		"BR_ERR_BAD_ALERT",
-		"Alert message from the peer has invalid contents"
-		" (odd length)."
-	}, {
-		BR_ERR_BAD_HANDSHAKE,
-		"BR_ERR_BAD_HANDSHAKE",
-		"Incoming handshake message decoding failed."
-	}, {
-		BR_ERR_OVERSIZED_ID,
-		"BR_ERR_OVERSIZED_ID",
-		"ServerHello contains a session ID which is larger than"
-		" 32 bytes."
-	}, {
-		BR_ERR_BAD_CIPHER_SUITE,
-		"BR_ERR_BAD_CIPHER_SUITE",
-		"Server wants to use a cipher suite that we did not claim"
-		" to support. This is also reported if we tried to advertise"
-		" a cipher suite that we do not support."
-	}, {
-		BR_ERR_BAD_COMPRESSION,
-		"BR_ERR_BAD_COMPRESSION",
-		"Server wants to use a compression that we did not claim"
-		" to support."
-	}, {
-		BR_ERR_BAD_FRAGLEN,
-		"BR_ERR_BAD_FRAGLEN",
-		"Server's max fragment length does not match client's."
-	}, {
-		BR_ERR_BAD_SECRENEG,
-		"BR_ERR_BAD_SECRENEG",
-		"Secure renegotiation failed."
-	}, {
-		BR_ERR_EXTRA_EXTENSION,
-		"BR_ERR_EXTRA_EXTENSION",
-		"Server sent an extension type that we did not announce,"
-		" or used the same extension type several times in a"
-		" single ServerHello."
-	}, {
-		BR_ERR_BAD_SNI,
-		"BR_ERR_BAD_SNI",
-		"Invalid Server Name Indication contents (when used by"
-		" the server, this extension shall be empty)."
-	}, {
-		BR_ERR_BAD_HELLO_DONE,
-		"BR_ERR_BAD_HELLO_DONE",
-		"Invalid ServerHelloDone from the server (length is not 0)."
-	}, {
-		BR_ERR_LIMIT_EXCEEDED,
-		"BR_ERR_LIMIT_EXCEEDED",
-		"Internal limit exceeded (e.g. server's public key is too"
-		" large)."
-	}, {
-		BR_ERR_BAD_FINISHED,
-		"BR_ERR_BAD_FINISHED",
-		"Finished message from peer does not match the expected"
-		" value."
-	}, {
-		BR_ERR_RESUME_MISMATCH,
-		"BR_ERR_RESUME_MISMATCH",
-		"Session resumption attempt with distinct version or cipher"
-		" suite."
-	}, {
-		BR_ERR_INVALID_ALGORITHM,
-		"BR_ERR_INVALID_ALGORITHM",
-		"Unsupported or invalid algorithm (ECDHE curve, signature"
-		" algorithm, hash function)."
-	}, {
-		BR_ERR_BAD_SIGNATURE,
-		"BR_ERR_BAD_SIGNATURE",
-		"Invalid signature in ServerKeyExchange or"
-		" CertificateVerify message."
-	}, {
-		BR_ERR_WRONG_KEY_USAGE,
-		"BR_ERR_WRONG_KEY_USAGE",
-		"Peer's public key does not have the proper type or is"
-		" not allowed for the requested operation."
-	}, {
-		BR_ERR_NO_CLIENT_AUTH,
-		"BR_ERR_NO_CLIENT_AUTH",
-		"Client did not send a certificate upon request, or the"
-		" client certificate could not be validated."
-	}, {
-		BR_ERR_IO,
-		"BR_ERR_IO",
-		"I/O error or premature close on transport stream."
-	}, {
-		BR_ERR_X509_INVALID_VALUE,
-		"BR_ERR_X509_INVALID_VALUE",
-		"Invalid value in an ASN.1 structure."
-	},
-	{
-		BR_ERR_X509_TRUNCATED,
-		"BR_ERR_X509_TRUNCATED",
-		"Truncated certificate or other ASN.1 object."
-	},
-	{
-		BR_ERR_X509_EMPTY_CHAIN,
-		"BR_ERR_X509_EMPTY_CHAIN",
-		"Empty certificate chain (no certificate at all)."
-	},
-	{
-		BR_ERR_X509_INNER_TRUNC,
-		"BR_ERR_X509_INNER_TRUNC",
-		"Decoding error: inner element extends beyond outer element"
-		" size."
-	},
-	{
-		BR_ERR_X509_BAD_TAG_CLASS,
-		"BR_ERR_X509_BAD_TAG_CLASS",
-		"Decoding error: unsupported tag class (application or"
-		" private)."
-	},
-	{
-		BR_ERR_X509_BAD_TAG_VALUE,
-		"BR_ERR_X509_BAD_TAG_VALUE",
-		"Decoding error: unsupported tag value."
-	},
-	{
-		BR_ERR_X509_INDEFINITE_LENGTH,
-		"BR_ERR_X509_INDEFINITE_LENGTH",
-		"Decoding error: indefinite length."
-	},
-	{
-		BR_ERR_X509_EXTRA_ELEMENT,
-		"BR_ERR_X509_EXTRA_ELEMENT",
-		"Decoding error: extraneous element."
-	},
-	{
-		BR_ERR_X509_UNEXPECTED,
-		"BR_ERR_X509_UNEXPECTED",
-		"Decoding error: unexpected element."
-	},
-	{
-		BR_ERR_X509_NOT_CONSTRUCTED,
-		"BR_ERR_X509_NOT_CONSTRUCTED",
-		"Decoding error: expected constructed element, but is"
-		" primitive."
-	},
-	{
-		BR_ERR_X509_NOT_PRIMITIVE,
-		"BR_ERR_X509_NOT_PRIMITIVE",
-		"Decoding error: expected primitive element, but is"
-		" constructed."
-	},
-	{
-		BR_ERR_X509_PARTIAL_BYTE,
-		"BR_ERR_X509_PARTIAL_BYTE",
-		"Decoding error: BIT STRING length is not multiple of 8."
-	},
-	{
-		BR_ERR_X509_BAD_BOOLEAN,
-		"BR_ERR_X509_BAD_BOOLEAN",
-		"Decoding error: BOOLEAN value has invalid length."
-	},
-	{
-		BR_ERR_X509_OVERFLOW,
-		"BR_ERR_X509_OVERFLOW",
-		"Decoding error: value is off-limits."
-	},
-	{
-		BR_ERR_X509_BAD_DN,
-		"BR_ERR_X509_BAD_DN",
-		"Invalid distinguished name."
-	},
-	{
-		BR_ERR_X509_BAD_TIME,
-		"BR_ERR_X509_BAD_TIME",
-		"Invalid date/time representation."
-	},
-	{
-		BR_ERR_X509_UNSUPPORTED,
-		"BR_ERR_X509_UNSUPPORTED",
-		"Certificate contains unsupported features that cannot be"
-		" ignored."
-	},
-	{
-		BR_ERR_X509_LIMIT_EXCEEDED,
-		"BR_ERR_X509_LIMIT_EXCEEDED",
-		"Key or signature size exceeds internal limits."
-	},
-	{
-		BR_ERR_X509_WRONG_KEY_TYPE,
-		"BR_ERR_X509_WRONG_KEY_TYPE",
-		"Key type does not match that which was expected."
-	},
-	{
-		BR_ERR_X509_BAD_SIGNATURE,
-		"BR_ERR_X509_BAD_SIGNATURE",
-		"Signature is invalid."
-	},
-	{
-		BR_ERR_X509_TIME_UNKNOWN,
-		"BR_ERR_X509_TIME_UNKNOWN",
-		"Validation time is unknown."
-	},
-	{
-		BR_ERR_X509_EXPIRED,
-		"BR_ERR_X509_EXPIRED",
-		"Certificate is expired or not yet valid."
-	},
-	{
-		BR_ERR_X509_DN_MISMATCH,
-		"BR_ERR_X509_DN_MISMATCH",
-		"Issuer/Subject DN mismatch in the chain."
-	},
-	{
-		BR_ERR_X509_BAD_SERVER_NAME,
-		"BR_ERR_X509_BAD_SERVER_NAME",
-		"Expected server name was not found in the chain."
-	},
-	{
-		BR_ERR_X509_CRITICAL_EXTENSION,
-		"BR_ERR_X509_CRITICAL_EXTENSION",
-		"Unknown critical extension in certificate."
-	},
-	{
-		BR_ERR_X509_NOT_CA,
-		"BR_ERR_X509_NOT_CA",
-		"Not a CA, or path length constraint violation."
-	},
-	{
-		BR_ERR_X509_FORBIDDEN_KEY_USAGE,
-		"BR_ERR_X509_FORBIDDEN_KEY_USAGE",
-		"Key Usage extension prohibits intended usage."
-	},
-	{
-		BR_ERR_X509_WEAK_PUBLIC_KEY,
-		"BR_ERR_X509_WEAK_PUBLIC_KEY",
-		"Public key found in certificate is too small."
-	},
-	{
-		BR_ERR_X509_NOT_TRUSTED,
-		"BR_ERR_X509_NOT_TRUSTED",
-		"Chain could not be linked to a trust anchor."
-	},
-	{ 0, 0, 0 }
+BearSSLErrorInfo bearssl_error_table[] = {
+	{ BR_ERR_BAD_PARAM,                LIT("BR_ERR_BAD_PARAM"),                LIT("Caller-provided parameter is incorrect.") },
+	{ BR_ERR_BAD_STATE,                LIT("BR_ERR_BAD_STATE"),                LIT("Operation requested by the caller cannot be applied with the current context state (e.g. reading data while outgoing data is waiting to be sent).") },
+	{ BR_ERR_UNSUPPORTED_VERSION,      LIT("BR_ERR_UNSUPPORTED_VERSION"),      LIT("Incoming protocol or record version is unsupported.") },
+	{ BR_ERR_BAD_VERSION,              LIT("BR_ERR_BAD_VERSION"),              LIT("Incoming record version does not match the expected version.") },
+	{ BR_ERR_BAD_LENGTH,               LIT("BR_ERR_BAD_LENGTH"),               LIT("Incoming record length is invalid.") },
+	{ BR_ERR_TOO_LARGE,                LIT("BR_ERR_TOO_LARGE"),                LIT("Incoming record is too large to be processed, or buffer is too small for the handshake message to send.") },
+	{ BR_ERR_BAD_MAC,                  LIT("BR_ERR_BAD_MAC"),                  LIT("Decryption found an invalid padding, or the record MAC is not correct.") },
+	{ BR_ERR_NO_RANDOM,                LIT("BR_ERR_NO_RANDOM"),                LIT("No initial entropy was provided, and none can be obtained from the OS.") },
+	{ BR_ERR_UNKNOWN_TYPE,             LIT("BR_ERR_UNKNOWN_TYPE"),             LIT("Incoming record type is unknown.") },
+	{ BR_ERR_UNEXPECTED,               LIT("BR_ERR_UNEXPECTED"),               LIT("Incoming record or message has wrong type with regards to the current engine state.") },
+	{ BR_ERR_BAD_CCS,                  LIT("BR_ERR_BAD_CCS"),                  LIT("ChangeCipherSpec message from the peer has invalid contents.") },
+	{ BR_ERR_BAD_ALERT,                LIT("BR_ERR_BAD_ALERT"),                LIT("Alert message from the peer has invalid contents (odd length).") },
+	{ BR_ERR_BAD_HANDSHAKE,            LIT("BR_ERR_BAD_HANDSHAKE"),            LIT("Incoming handshake message decoding failed.") },
+	{ BR_ERR_OVERSIZED_ID,             LIT("BR_ERR_OVERSIZED_ID"),             LIT("ServerHello contains a session ID which is larger than 32 bytes.") },
+	{ BR_ERR_BAD_CIPHER_SUITE,         LIT("BR_ERR_BAD_CIPHER_SUITE"),         LIT("Server wants to use a cipher suite that we did not claim to support. This is also reported if we tried to advertise a cipher suite that we do not support.") },
+	{ BR_ERR_BAD_COMPRESSION,          LIT("BR_ERR_BAD_COMPRESSION"),          LIT("Server wants to use a compression that we did not claim to support.") },
+	{ BR_ERR_BAD_FRAGLEN,              LIT("BR_ERR_BAD_FRAGLEN"),              LIT("Server's max fragment length does not match client's.") },
+	{ BR_ERR_BAD_SECRENEG,             LIT("BR_ERR_BAD_SECRENEG"),             LIT("Secure renegotiation failed.") },
+	{ BR_ERR_EXTRA_EXTENSION,          LIT("BR_ERR_EXTRA_EXTENSION"),          LIT("Server sent an extension type that we did not announce, or used the same extension type several times in a single ServerHello.") },
+	{ BR_ERR_BAD_SNI,                  LIT("BR_ERR_BAD_SNI"),                  LIT("Invalid Server Name Indication contents (when used by the server, this extension shall be empty).") },
+	{ BR_ERR_BAD_HELLO_DONE,           LIT("BR_ERR_BAD_HELLO_DONE"),           LIT("Invalid ServerHelloDone from the server (length is not 0).") },
+	{ BR_ERR_LIMIT_EXCEEDED,           LIT("BR_ERR_LIMIT_EXCEEDED"),           LIT("Internal limit exceeded (e.g. server's public key is too large).") },
+	{ BR_ERR_BAD_FINISHED,             LIT("BR_ERR_BAD_FINISHED"),             LIT("Finished message from peer does not match the expected value.") },
+	{ BR_ERR_RESUME_MISMATCH,          LIT("BR_ERR_RESUME_MISMATCH"),          LIT("Session resumption attempt with distinct version or cipher suite.") },
+	{ BR_ERR_INVALID_ALGORITHM,        LIT("BR_ERR_INVALID_ALGORITHM"),        LIT("Unsupported or invalid algorithm (ECDHE curve, signature algorithm, hash function).") },
+	{ BR_ERR_BAD_SIGNATURE,            LIT("BR_ERR_BAD_SIGNATURE"),            LIT("Invalid signature in ServerKeyExchange or CertificateVerify message.") },
+	{ BR_ERR_WRONG_KEY_USAGE,          LIT("BR_ERR_WRONG_KEY_USAGE"),          LIT("Peer's public key does not have the proper type or is not allowed for the requested operation.") },
+	{ BR_ERR_NO_CLIENT_AUTH,           LIT("BR_ERR_NO_CLIENT_AUTH"),           LIT("Client did not send a certificate upon request, or the client certificate could not be validated.") },
+	{ BR_ERR_IO,                       LIT("BR_ERR_IO"),                       LIT("I/O error or premature close on transport stream.") },
+	{ BR_ERR_X509_INVALID_VALUE,       LIT("BR_ERR_X509_INVALID_VALUE"),       LIT("Invalid value in an ASN.1 structure.") },
+	{ BR_ERR_X509_TRUNCATED,           LIT("BR_ERR_X509_TRUNCATED"),           LIT("Truncated certificate or other ASN.1 object.") },
+	{ BR_ERR_X509_EMPTY_CHAIN,         LIT("BR_ERR_X509_EMPTY_CHAIN"),         LIT("Empty certificate chain (no certificate at all).") },
+	{ BR_ERR_X509_INNER_TRUNC,         LIT("BR_ERR_X509_INNER_TRUNC"),         LIT("Decoding error: inner element extends beyond outer element size.") },
+	{ BR_ERR_X509_BAD_TAG_CLASS,       LIT("BR_ERR_X509_BAD_TAG_CLASS"),       LIT("Decoding error: unsupported tag class (application or private).") },
+	{ BR_ERR_X509_BAD_TAG_VALUE,       LIT("BR_ERR_X509_BAD_TAG_VALUE"),       LIT("Decoding error: unsupported tag value.") },
+	{ BR_ERR_X509_INDEFINITE_LENGTH,   LIT("BR_ERR_X509_INDEFINITE_LENGTH"),   LIT("Decoding error: indefinite length.") },
+	{ BR_ERR_X509_EXTRA_ELEMENT,       LIT("BR_ERR_X509_EXTRA_ELEMENT"),       LIT("Decoding error: extraneous element.") },
+	{ BR_ERR_X509_UNEXPECTED,          LIT("BR_ERR_X509_UNEXPECTED"),          LIT("Decoding error: unexpected element.") },
+	{ BR_ERR_X509_NOT_CONSTRUCTED,     LIT("BR_ERR_X509_NOT_CONSTRUCTED"),     LIT("Decoding error: expected constructed element, but is primitive.") },
+	{ BR_ERR_X509_NOT_PRIMITIVE,       LIT("BR_ERR_X509_NOT_PRIMITIVE"),       LIT("Decoding error: expected primitive element, but is constructed.") },
+	{ BR_ERR_X509_PARTIAL_BYTE,        LIT("BR_ERR_X509_PARTIAL_BYTE"),        LIT("Decoding error: BIT STRING length is not multiple of 8.") },
+	{ BR_ERR_X509_BAD_BOOLEAN,         LIT("BR_ERR_X509_BAD_BOOLEAN"),         LIT("Decoding error: BOOLEAN value has invalid length.") },
+	{ BR_ERR_X509_OVERFLOW,            LIT("BR_ERR_X509_OVERFLOW"),            LIT("Decoding error: value is off-limits.") },
+	{ BR_ERR_X509_BAD_DN,              LIT("BR_ERR_X509_BAD_DN"),              LIT("Invalid distinguished name.") },
+	{ BR_ERR_X509_BAD_TIME,            LIT("BR_ERR_X509_BAD_TIME"),            LIT("Invalid date/time representation.") },
+	{ BR_ERR_X509_UNSUPPORTED,         LIT("BR_ERR_X509_UNSUPPORTED"),         LIT("Certificate contains unsupported features that cannot be ignored.") },
+	{ BR_ERR_X509_LIMIT_EXCEEDED,      LIT("BR_ERR_X509_LIMIT_EXCEEDED"),      LIT("Key or signature size exceeds internal limits.") },
+	{ BR_ERR_X509_WRONG_KEY_TYPE,      LIT("BR_ERR_X509_WRONG_KEY_TYPE"),      LIT("Key type does not match that which was expected.") },
+	{ BR_ERR_X509_BAD_SIGNATURE,       LIT("BR_ERR_X509_BAD_SIGNATURE"),       LIT("Signature is invalid.") },
+	{ BR_ERR_X509_TIME_UNKNOWN,        LIT("BR_ERR_X509_TIME_UNKNOWN"),        LIT("Validation time is unknown.") },
+	{ BR_ERR_X509_EXPIRED,             LIT("BR_ERR_X509_EXPIRED"),             LIT("Certificate is expired or not yet valid.") },
+	{ BR_ERR_X509_DN_MISMATCH,         LIT("BR_ERR_X509_DN_MISMATCH"),         LIT("Issuer/Subject DN mismatch in the chain.") },
+	{ BR_ERR_X509_BAD_SERVER_NAME,     LIT("BR_ERR_X509_BAD_SERVER_NAME"),     LIT("Expected server name was not found in the chain.") },
+	{ BR_ERR_X509_CRITICAL_EXTENSION,  LIT("BR_ERR_X509_CRITICAL_EXTENSION"),  LIT("Unknown critical extension in certificate.") },
+	{ BR_ERR_X509_NOT_CA,              LIT("BR_ERR_X509_NOT_CA"),              LIT("Not a CA, or path length constraint violation.") },
+	{ BR_ERR_X509_FORBIDDEN_KEY_USAGE, LIT("BR_ERR_X509_FORBIDDEN_KEY_USAGE"), LIT("Key Usage extension prohibits intended usage.") },
+	{ BR_ERR_X509_WEAK_PUBLIC_KEY,     LIT("BR_ERR_X509_WEAK_PUBLIC_KEY"),     LIT("Public key found in certificate is too small.") },
+	{ BR_ERR_X509_NOT_TRUSTED,         LIT("BR_ERR_X509_NOT_TRUSTED"),         LIT("Chain could not be linked to a trust anchor.") },
 };
 
-// Prepare a vector buffer for adding 'extra' elements.
-//   buf      current buffer
-//   esize    size of a vector element
-//   ptr      pointer to the 'ptr' vector field
-//   len      pointer to the 'len' vector field
-//   extra    number of elements to add
-//
-// If the buffer must be enlarged, then this function allocates the new
-// buffer and releases the old one. The new buffer address is then returned.
-// If the buffer needs not be enlarged, then the buffer address is returned.
-//
-// In case of enlargement, the 'len' field is adjusted accordingly. The
-// 'ptr' field is not modified.
-void *
-vector_expand(void *buf,
-	size_t esize, size_t *ptr, size_t *len, size_t extra)
+BearSSLErrorInfo get_bearssl_error_info(int code)
 {
-	size_t nlen;
-	void *nbuf;
-
-	if (*len - *ptr >= extra) {
-		return buf;
-	}
-	nlen = (*len << 1);
-	if (nlen - *ptr < extra) {
-		nlen = extra + *ptr;
-		if (nlen < 8) {
-			nlen = 8;
-		}
-	}
-	nbuf = malloc(nlen * esize);
-	if (buf != NULL) {
-		memcpy(nbuf, buf, *len * esize);
-		free(buf);
-	}
-	*len = nlen;
-	return nbuf;
+	for (int i = 0; i < COUNTOF(bearssl_error_table); i++)
+		if (bearssl_error_table[i].code == code)
+			return bearssl_error_table[i];
+	BearSSLErrorInfo fallback;
+	fallback.code = code;
+	fallback.name = LIT("Unknown");
+	fallback.comment = LIT(":/");
+	return fallback;
 }
 
-/* see brssl.h */
-const char *
-find_error_name(int err, const char **comment)
-{
-	size_t u;
+typedef struct {
+	string name;
+	string content;
+} PemObject;
 
-	for (u = 0; errors[u].name; u ++) {
-		if (errors[u].err == err) {
-			if (comment != NULL) {
-				*comment = errors[u].comment;
-			}
-			return errors[u].name;
-		}
-	}
-	return NULL;
-}
+typedef struct {
 
-void *xblobdup(const void *src, size_t len)
-{
-	void *buf;
+	bool   failed;
 
-	buf = mymalloc(len);
-	memcpy(buf, src, len);
-	return buf;
-}
+	char  *buffer;
+	size_t buffer_count;
+	size_t buffer_capacity;
 
-char *xstrdup(const void *src)
-{
-	return xblobdup(src, strlen(src) + 1);
-}
+} PemDecodeContext;
 
 int is_ign(int c)
 {
@@ -2520,392 +2214,488 @@ int is_ign(int c)
 //    ASCII letters are converted to lowercase
 //    control characters, space, '-', '_', '.', '/', '+' and ':' are ignored
 // A terminating zero is returned as 0.
-static int
-next_char(const char **ps, const char *limit)
+char next_char(string *s)
+{
+	size_t i = 0;
+	while (i < s->size && is_ign(s->data[i]))
+		i++;
+
+	char c;
+	if (i == s->size)
+		c = '\0';
+	else {
+		c = s->data[i++];
+		assert(c != '\0');
+	}
+
+	s->data += i;
+	s->size -= i;
+	return to_lower(c);
+}
+
+bool eqstr__(string a, string b)
 {
 	for (;;) {
-		int c;
-
-		if (*ps == limit) {
-			return 0;
-		}
-		c = *(*ps) ++;
-		if (c == 0) {
-			return 0;
-		}
-		if (c >= 'A' && c <= 'Z') {
-			c += 'a' - 'A';
-		}
-		if (!is_ign(c)) {
-			return c;
-		}
+		char c1 = next_char(&a);
+		char c2 = next_char(&b);
+		if (c1 != c2) return false;
+		if (c1 == 0)  return true;
 	}
 }
 
-int eqstr_chunk(const char *s1, size_t s1_len, const char *s2, size_t s2_len)
+void append_bytes(void *userptr, const void *str, size_t len)
 {
-	const char *lim1, *lim2;
+	PemDecodeContext *context = userptr;
 
-	lim1 = s1 + s1_len;
-	lim2 = s2 + s2_len;
-	for (;;) {
-		int c1, c2;
+	if (context->failed)
+		return;
 
-		c1 = next_char(&s1, lim1);
-		c2 = next_char(&s2, lim2);
-		if (c1 != c2) {
-			return 0;
+	if (context->buffer_capacity - context->buffer_count < len) {
+
+		size_t newcap = MAX(2 * context->buffer_capacity, context->buffer_count + len);
+		void  *newstr = mymalloc(newcap);
+		if (newstr == NULL) {
+			context->failed = true;
+			return;
 		}
-		if (c1 == 0) {
-			return 1;
+
+		if (context->buffer) {
+			memcpy(newstr, context->buffer, context->buffer_count);
+			myfree(context->buffer, context->buffer_capacity);
 		}
+		context->buffer = newstr;
+		context->buffer_capacity = newcap;
 	}
+
+	memcpy(context->buffer + context->buffer_count, str, len);
+	context->buffer_count += len;
 }
 
-int eqstr(const char *s1, const char *s2)
-{
-	return eqstr_chunk(s1, strlen(s1), s2, strlen(s2));
-}
+typedef struct {
+	PemObject *items;
+	int count;
+	int capacity;
+} PemArray;
 
-static void
-vblob_append(void *cc, const void *data, size_t len)
+bool append_pem(PemArray *arr, PemObject obj)
 {
-	bvector *bv;
-
-	bv = cc;
-	VEC_ADDMANY(*bv, data, len);
-}
-
-void free_pem_object_contents(pem_object *po)
-{
-	if (po != NULL) {
-		free(po->name);
-		free(po->data);
+	if (arr->count == arr->capacity) {
+		int newcap = MAX(2 * arr->capacity, 4);
+		PemObject *newitems = mymalloc(newcap * sizeof(PemObject));
+		if (newitems == NULL)
+			return false;
+		if (arr->count)
+			memcpy(arr->items, newitems, arr->count * sizeof(PemObject));
+		myfree(arr->items, arr->capacity * sizeof(PemObject));
+		arr->items = newitems;
+		arr->capacity = newcap;
 	}
+
+	arr->items[arr->count++] = obj;
+	return true;
 }
 
-pem_object *decode_pem(const void *src, size_t len, size_t *num)
+void free_pem_array(PemArray *arr)
 {
-	VECTOR(pem_object) pem_list = VEC_INIT;
-	br_pem_decoder_context pc;
-	pem_object po, *pos;
-	const unsigned char *buf;
-	bvector bv = VEC_INIT;
-	int inobj;
-	int extra_nl;
+	for (int i = 0; i < arr->count; i++) {
 
-	*num = 0;
-	br_pem_decoder_init(&pc);
-	buf = src;
-	inobj = 0;
-	po.name = NULL;
-	po.data = NULL;
-	po.data_len = 0;
-	extra_nl = 1;
-	while (len > 0) {
-		size_t tlen;
+		string name = arr->items[i].name;
+		myfree(name.data, name.size);
 
-		tlen = br_pem_decoder_push(&pc, buf, len);
-		buf += tlen;
-		len -= tlen;
-		switch (br_pem_decoder_event(&pc)) {
+		string content = arr->items[i].content;
+		if (content.data)
+			myfree(content.data, content.size);
+	}
+	myfree(arr->items, arr->capacity * sizeof(PemObject));
+}
 
-		case BR_PEM_BEGIN_OBJ:
-			po.name = xstrdup(br_pem_decoder_name(&pc));
-			br_pem_decoder_setdest(&pc, vblob_append, &bv);
-			inobj = 1;
-			break;
+bool decode_pem(string src, PemArray *array)
+{
+	br_pem_decoder_context context;
+	br_pem_decoder_init(&context);
 
-		case BR_PEM_END_OBJ:
-			if (inobj) {
-				po.data = VEC_TOARRAY(bv);
-				po.data_len = VEC_LEN(bv);
-				VEC_ADD(pem_list, po);
-				VEC_CLEAR(bv);
-				po.name = NULL;
-				po.data = NULL;
-				po.data_len = 0;
-				inobj = 0;
+	PemDecodeContext context2;
+	context2.failed = false;
+	context2.buffer = NULL;
+	context2.buffer_count = 0;
+	context2.buffer_capacity = 0;
+
+	array->items = NULL;
+	array->count = 0;
+	array->capacity = 0;
+
+	PemObject po;
+	po.name = NULLSTR;
+	po.content = NULLSTR;
+
+	bool inside_object = false;
+	bool extra_newline = true;
+	while (src.size > 0) {
+
+		size_t n = br_pem_decoder_push(&context, src.data, src.size);
+		src.data += n;
+		src.size -= n;
+
+		switch (br_pem_decoder_event(&context)) {
+			case BR_PEM_BEGIN_OBJ:
+			{
+				const char *name = br_pem_decoder_name(&context);
+				size_t name_len = strlen(name);
+
+				po.name.data = mymalloc(name_len);
+				po.name.size = name_len;
+
+				if (po.name.data == NULL) {
+					myfree(context2.buffer, context2.buffer_capacity);
+					free_pem_array(array);
+					return false;
+				}
+				memcpy(po.name.data, name, name_len);
+
+				br_pem_decoder_setdest(&context, append_bytes, &context2);
+				inside_object = true;
 			}
 			break;
 
-		case BR_PEM_ERROR:
-			free(po.name);
-			VEC_CLEAR(bv);
-			log_data(LIT("Invalid PEM encoding"));
-			VEC_CLEAREXT(pem_list, &free_pem_object_contents);
-			return NULL;
+			case BR_PEM_END_OBJ:
+			if (inside_object) {
+
+				void *copy = mymalloc(context2.buffer_count);
+				if (copy == NULL) {
+					myfree(po.name.data, po.name.size);
+					myfree(context2.buffer, context2.buffer_capacity);
+					free_pem_array(array);
+					return false;
+				}
+				memcpy(copy, context2.buffer, context2.buffer_count);
+
+				po.content.data = copy;
+				po.content.size = context2.buffer_count;
+
+				if (!append_pem(array, po)) {
+					myfree(po.name.data, po.name.size);
+					myfree(context2.buffer, context2.buffer_capacity);
+					free_pem_array(array);
+					return false;
+				}
+
+				po.name = NULLSTR;
+				po.content = NULLSTR;
+
+				context2.buffer_count = 0;
+				inside_object = false;
+			}
+			break;
+
+			case BR_PEM_ERROR:
+			myfree(po.name.data, po.name.size);
+			myfree(context2.buffer, context2.buffer_capacity);
+			free_pem_array(array);
+			log_data(LIT("Invalid PEM"));
+			return false;
 		}
 
-		/*
-		 * We add an extra newline at the end, in order to
-		 * support PEM files that lack the newline on their last
-		 * line (this is somwehat invalid, but PEM format is not
-		 * standardised and such files do exist in the wild, so
-		 * we'd better accept them).
-		 */
-		if (len == 0 && extra_nl) {
-			extra_nl = 0;
-			buf = (const unsigned char *)"\n";
-			len = 1;
+		if (src.size == 0 && extra_newline) {
+			src.data = "\n";
+			src.size = 1;
+			extra_newline = false;
 		}
 	}
-	if (inobj) {
-		log_data(LIT("Unfinished PEM object"));
-		free(po.name);
-		VEC_CLEAR(bv);
-		VEC_CLEAREXT(pem_list, &free_pem_object_contents);
-		return NULL;
+	if (context2.failed) {
+		myfree(po.name.data, po.name.size);
+		myfree(context2.buffer, context2.buffer_capacity);
+		free_pem_array(array);
+		return false;
+	}
+	if (inside_object) {
+		myfree(po.name.data, po.name.size);
+		myfree(context2.buffer, context2.buffer_capacity);
+		free_pem_array(array);
+		log_data(LIT("Unfinished PEM"));
+		return false;
 	}
 
-	*num = VEC_LEN(pem_list);
-	VEC_ADD(pem_list, po);
-	pos = VEC_TOARRAY(pem_list);
-	VEC_CLEAR(pem_list);
-	return pos;
+	return true;
 }
 
-int looks_like_DER(const unsigned char *buf, size_t len)
+int looks_like_DER(string content)
 {
 	int fb;
 	size_t dlen;
 
-	if (len < 2) {
+	if (content.size < 2) {
 		return 0;
 	}
-	if (*buf ++ != 0x30) {
+	if (*content.data ++ != 0x30) {
 		return 0;
 	}
-	fb = *buf ++;
-	len -= 2;
+	fb = *content.data ++;
+	content.size -= 2;
 	if (fb < 0x80) {
-		return (size_t)fb == len;
+		return (size_t)fb == content.size;
 	} else if (fb == 0x80) {
 		return 0;
 	} else {
 		fb -= 0x80;
-		if (len < (size_t)fb + 2) {
+		if (content.size < (size_t)fb + 2) {
 			return 0;
 		}
-		len -= (size_t)fb;
+		content.size -= (size_t)fb;
 		dlen = 0;
 		while (fb -- > 0) {
-			if (dlen > (len >> 8)) {
+			if (dlen > (content.size >> 8)) {
 				return 0;
 			}
-			dlen = (dlen << 8) + (size_t)*buf ++;
+			dlen = (dlen << 8) + (size_t)*content.data ++;
 		}
-		return dlen == len;
+		return dlen == content.size;
 	}
 }
 
-br_x509_certificate *read_certificates_from_buffer(unsigned char *buf, size_t len, size_t *num)
+bool decode_key(string src, PrivateKey *pkey)
 {
-	VECTOR(br_x509_certificate) cert_list = VEC_INIT;
-	pem_object *pos;
-	size_t u, num_pos;
-	br_x509_certificate *xcs;
-	br_x509_certificate dummy;
+	br_skey_decoder_context context;
+	br_skey_decoder_init(&context);
+	br_skey_decoder_push(&context, src.data, src.size);
 
-	*num = 0;
-
-	// Check for a DER-encoded certificate.
-	if (looks_like_DER(buf, len)) {
-		xcs = mymalloc(2 * sizeof *xcs);
-		xcs[0].data = buf;
-		xcs[0].data_len = len;
-		xcs[1].data = NULL;
-		xcs[1].data_len = 0;
-		*num = 1;
-		return xcs;
-	}
-
-	pos = decode_pem(buf, len, &num_pos);
-	if (pos == NULL)
-		return NULL;
-
-	for (u = 0; u < num_pos; u ++) {
-		if (eqstr(pos[u].name, "CERTIFICATE")
-			|| eqstr(pos[u].name, "X509 CERTIFICATE"))
-		{
-			br_x509_certificate xc;
-
-			xc.data = pos[u].data;
-			xc.data_len = pos[u].data_len;
-			pos[u].data = NULL;
-			VEC_ADD(cert_list, xc);
-		}
-	}
-	for (u = 0; u < num_pos; u ++) {
-		free_pem_object_contents(&pos[u]);
-	}
-	free(pos);
-
-	if (VEC_LEN(cert_list) == 0) {
-		log_data(LIT("No certificate in buffer\n"));
-		return NULL;
-	}
-	*num = VEC_LEN(cert_list);
-	dummy.data = NULL;
-	dummy.data_len = 0;
-	VEC_ADD(cert_list, dummy);
-	xcs = VEC_TOARRAY(cert_list);
-	VEC_CLEAR(cert_list);
-	return xcs;
-}
-
-br_x509_certificate *read_certificates_from_file(string file, size_t *num)
-{
-	string data;
-	if (!load_file_contents(file, &data))
+	int err = br_skey_decoder_last_error(&context);
+	if (err) {
+		BearSSLErrorInfo error_info = get_bearssl_error_info(err);
+		log_format("Error decoding key: %.*s: (code=%d, %.*s)\n", 
+			(int) error_info.name.size, error_info.name.data, err,
+			(int) error_info.comment.size, error_info.comment.data);
 		return false;
-	br_x509_certificate *certs = read_certificates_from_buffer((unsigned char*) data.data, data.size, num);
-	free(data.data);
-	return certs;
-}
-
-void free_certificates(br_x509_certificate *certs, size_t num)
-{
-	size_t u;
-
-	for (u = 0; u < num; u ++) {
-		free(certs[u].data);
-	}
-	free(certs);
-}
-
-static private_key *
-decode_key(const unsigned char *buf, size_t len)
-{
-	br_skey_decoder_context dc;
-	int err;
-	private_key *sk;
-
-	br_skey_decoder_init(&dc);
-	br_skey_decoder_push(&dc, buf, len);
-	err = br_skey_decoder_last_error(&dc);
-	if (err != 0) {
-		const char *errname, *errmsg;
-
-		errname = find_error_name(err, &errmsg);
-		if (errname != NULL)
-			log_format("Error decoding key: %s: %s (%d)", errname, errmsg, err);
-		else
-			log_format("Error decoding key: unknown (%d)", err);
-		return NULL;
-	}
-	switch (br_skey_decoder_key_type(&dc)) {
-		const br_rsa_private_key *rk;
-		const br_ec_private_key *ek;
-
-	case BR_KEYTYPE_RSA:
-		rk = br_skey_decoder_get_rsa(&dc);
-		sk = mymalloc(sizeof *sk);
-		sk->key_type = BR_KEYTYPE_RSA;
-		sk->key.rsa.n_bitlen = rk->n_bitlen;
-		sk->key.rsa.p = xblobdup(rk->p, rk->plen);
-		sk->key.rsa.plen = rk->plen;
-		sk->key.rsa.q = xblobdup(rk->q, rk->qlen);
-		sk->key.rsa.qlen = rk->qlen;
-		sk->key.rsa.dp = xblobdup(rk->dp, rk->dplen);
-		sk->key.rsa.dplen = rk->dplen;
-		sk->key.rsa.dq = xblobdup(rk->dq, rk->dqlen);
-		sk->key.rsa.dqlen = rk->dqlen;
-		sk->key.rsa.iq = xblobdup(rk->iq, rk->iqlen);
-		sk->key.rsa.iqlen = rk->iqlen;
-		break;
-
-	case BR_KEYTYPE_EC:
-		ek = br_skey_decoder_get_ec(&dc);
-		sk = mymalloc(sizeof *sk);
-		sk->key_type = BR_KEYTYPE_EC;
-		sk->key.ec.curve = ek->curve;
-		sk->key.ec.x = xblobdup(ek->x, ek->xlen);
-		sk->key.ec.xlen = ek->xlen;
-		break;
-
-	default:
-		log_format("Unknown key type: %d\n", br_skey_decoder_key_type(&dc));
-		sk = NULL;
-		break;
 	}
 
-	return sk;
-}
+	switch (br_skey_decoder_key_type(&context)) {
 
-private_key *read_private_key(string file)
-{
-	unsigned char *buf;
-	size_t len;
-	private_key *sk;
-	pem_object *pos;
-	size_t num, u;
+		const br_rsa_private_key *rsa_key;
+		const br_ec_private_key *ec_key;
 
-	buf = NULL;
-	pos = NULL;
-	sk = NULL;
+		case BR_KEYTYPE_RSA:
+		{
+			rsa_key = br_skey_decoder_get_rsa(&context);
 
-	string out;
-	if (!load_file_contents(file, &out))
-		goto deckey_exit;
-	buf = (unsigned char*) out.data;
-	len = out.size;
+			unsigned char *mem = mymalloc(rsa_key->plen + rsa_key->qlen + rsa_key->dplen + rsa_key->dqlen + rsa_key->iqlen);
+			if (mem == NULL) return false;
 
-	if (looks_like_DER(buf, len)) {
-		sk = decode_key(buf, len);
-		goto deckey_exit;
-	} else {
-		pos = decode_pem(buf, len, &num);
-		if (pos == NULL) {
-			goto deckey_exit;
+			pkey->type = BR_KEYTYPE_RSA;
+			pkey->rsa.n_bitlen = rsa_key->n_bitlen;
+
+			pkey->rsa.p  = mem;
+			pkey->rsa.q  = mem + rsa_key->plen;
+			pkey->rsa.dp = mem + rsa_key->plen + rsa_key->qlen;
+			pkey->rsa.dq = mem + rsa_key->plen + rsa_key->qlen + rsa_key->dplen;
+			pkey->rsa.iq = mem + rsa_key->plen + rsa_key->qlen + rsa_key->dplen + rsa_key->dqlen;
+
+			memcpy(pkey->rsa.p, rsa_key->p, rsa_key->plen);
+			memcpy(pkey->rsa.q, rsa_key->q, rsa_key->qlen);
+			memcpy(pkey->rsa.dp, rsa_key->dp, rsa_key->dplen);
+			memcpy(pkey->rsa.dq, rsa_key->dq, rsa_key->dqlen);
+			memcpy(pkey->rsa.iq, rsa_key->iq, rsa_key->iqlen);
+
+			pkey->rsa.plen = rsa_key->plen;
+			pkey->rsa.qlen = rsa_key->qlen;
+			pkey->rsa.dplen = rsa_key->dplen;
+			pkey->rsa.dqlen = rsa_key->dqlen;
+			pkey->rsa.iqlen = rsa_key->iqlen;
 		}
-		for (u = 0; pos[u].name; u ++) {
-			const char *name;
+		break;
 
-			name = pos[u].name;
-			if (eqstr(name, "RSA PRIVATE KEY")
-				|| eqstr(name, "EC PRIVATE KEY")
-				|| eqstr(name, "PRIVATE KEY"))
-			{
-				sk = decode_key(pos[u].data, pos[u].data_len);
-				goto deckey_exit;
+		case BR_KEYTYPE_EC:
+		{
+			ec_key = br_skey_decoder_get_ec(&context);
+			pkey->type = BR_KEYTYPE_EC;
+			pkey->ec.curve = ec_key->curve;
+			pkey->ec.x = mymalloc(ec_key->xlen);
+			if (pkey->ec.x == NULL)
+				return false;
+			memcpy(pkey->ec.x, ec_key->x, ec_key->xlen);
+			pkey->ec.xlen = ec_key->xlen;
+		}
+		break;
+	
+		default:
+		log_format("Unknown key type: %d\n", br_skey_decoder_key_type(&context));
+		return false;
+	}
+
+	return true;
+}
+
+bool load_private_key_from_file(string file, PrivateKey *pkey)
+{
+	string file_contents;
+	if (!load_file_contents(file, &file_contents))
+		return false;
+
+	DEBUG("loading key: file contents loaded\n");
+
+	bool ok;
+	if (looks_like_DER(file_contents)) {
+		DEBUG("loading key: detected DER file\n");
+		ok = decode_key(file_contents, pkey);
+	} else {
+
+		DEBUG("loading key: detected PEM file\n");
+
+		PemArray pem_array;
+		if (!decode_pem(file_contents, &pem_array)) {
+			myfree(file_contents.data, file_contents.size);
+			return false;
+		}
+
+		bool found = false;
+		bool decoded = false;
+		for (int i = 0; i < pem_array.count; i++)
+			if (eqstr__(pem_array.items[i].name, LIT("RSA PRIVATE KEY"))
+				|| eqstr__(pem_array.items[i].name, LIT("EC PRIVATE KEY"))
+				|| eqstr__(pem_array.items[i].name, LIT("PRIVATE KEY"))) {
+
+				DEBUG("loading key: found key in PEM file\n");
+
+				if (decode_key(pem_array.items[i].content, pkey))
+					decoded = true;
+
+				found = true;
+				break;
+			}
+
+		ok = false;
+		if (!found)
+			log_data(LIT("Missing private key in file\n"));
+		else {
+			if (!decoded)
+				log_data(LIT("Couldn't decode key\n"));
+			else
+				ok = true;
+		}
+		free_pem_array(&pem_array);
+	}
+
+	myfree(file_contents.data, file_contents.size);
+	return ok;
+}
+
+void free_private_key(PrivateKey *pkey)
+{
+	switch (pkey->type) {
+	
+		case BR_KEYTYPE_RSA:
+		myfree(pkey->rsa.p, pkey->rsa.plen + pkey->rsa.qlen + pkey->rsa.dplen + pkey->rsa.dqlen + pkey->rsa.iqlen);
+		break;
+
+		case BR_KEYTYPE_EC:
+		myfree(pkey->ec.x, pkey->ec.xlen);
+		break;
+	}
+}
+
+bool append_cert(CertArray *arr, br_x509_certificate cert)
+{
+	if (arr->count == arr->capacity) {
+		int newcap = MAX(2 * arr->capacity, 4);
+		br_x509_certificate *newitems = mymalloc(newcap * sizeof(br_x509_certificate));
+		if (newitems == NULL)
+			return false;
+		if (arr->count)
+			memcpy(arr->items, newitems, arr->count * sizeof(br_x509_certificate));
+		myfree(arr->items, arr->capacity * sizeof(br_x509_certificate));
+		arr->items = newitems;
+		arr->capacity = newcap;
+	}
+
+	arr->items[arr->count++] = cert;
+	return true;
+}
+
+bool load_certs_from_file(string file, CertArray *array)
+{
+	string file_contents;
+	if (!load_file_contents(file, &file_contents))
+		return false;
+	
+	DEBUG("loading certs: file contents loaded\n");
+
+	array->items = NULL;
+	array->count = 0;
+	array->capacity = 0;
+
+	if (looks_like_DER(file_contents)) {
+
+		DEBUG("loading certs: detected DER file\n");
+
+		br_x509_certificate xc = {
+			(unsigned char*) file_contents.data,
+			file_contents.size,
+		};
+		if (!append_cert(array, xc)) {
+			myfree(file_contents.data, file_contents.size);
+			return false;
+		}
+
+		DEBUG("loading certs: DER file parsed\n");
+
+	} else {
+
+		DEBUG("loading certs: detected PEM file\n");
+
+		PemArray pem_array;
+		if (!decode_pem(file_contents, &pem_array)) {
+			myfree(file_contents.data, file_contents.size);
+			return false;
+		}
+
+		DEBUG("loading certs: PEM file parsed (%d entries)\n", pem_array.count);
+
+		for (int i = 0; i < pem_array.count; i++) {
+
+			PemObject po = pem_array.items[i];
+
+			if (eqstr__(po.name, LIT("CERTIFICATE")) || eqstr__(po.name, LIT("X509 CERTIFICATE"))) {
+
+				DEBUG("loading certs: found certificate in PEM file\n");
+
+				br_x509_certificate xc = { (unsigned char*) po.content.data, po.content.size };
+
+				if (!append_cert(array, xc)) {
+					free_pem_array(&pem_array);
+					free_certs(array);
+					myfree(file_contents.data, file_contents.size);
+					return false;
+				}
+
+				pem_array.items[i].content = NULLSTR;
+			} else {
+				DEBUG("loading certs: ignoring entry [%.*s] in PEM file\n", (int) po.name.size, po.name.data);
 			}
 		}
-		log_data(LIT("No private key in file\n"));
-		goto deckey_exit;
+
+		DEBUG("loading certs: finished loading certificates from PEM file\n");
+
+		if (array->count == 0) {
+			free_pem_array(&pem_array);
+			free_certs(array);
+			myfree(file_contents.data, file_contents.size);
+			log_data(LIT("No certificates in file\n"));
+			return false;
+		}
+
+		free_pem_array(&pem_array);
+		myfree(file_contents.data, file_contents.size);
 	}
 
-deckey_exit:
-	if (buf != NULL) {
-		free(buf);
-	}
-	if (pos != NULL) {
-		for (u = 0; pos[u].name; u ++) {
-			free_pem_object_contents(&pos[u]);
-		}
-		free(pos);
-	}
-	return sk;
+	DEBUG("loading certs: certificate loaded\n");
+	return true;
 }
 
-void free_private_key(private_key *sk)
+void free_certs(CertArray *array)
 {
-	if (sk == NULL) {
-		return;
+	for (int i = 0; i < array->count; i++) {
+		br_x509_certificate item = array->items[i];
+		myfree(item.data, item.data_len);
 	}
-	switch (sk->key_type) {
-	case BR_KEYTYPE_RSA:
-		free(sk->key.rsa.p);
-		free(sk->key.rsa.q);
-		free(sk->key.rsa.dp);
-		free(sk->key.rsa.dq);
-		free(sk->key.rsa.iq);
-		break;
-	case BR_KEYTYPE_EC:
-		free(sk->key.ec.x);
-		break;
-	}
-	free(sk);
+	myfree(array->items, array->capacity * sizeof(br_x509_certificate));
 }
 
 #endif /* HTTPS */
@@ -2957,11 +2747,6 @@ uint64_t get_real_time_ms(void)
 	int ret = clock_gettime(CLOCK_REALTIME, &ts);
 	if (ret) log_fatal(LIT("Couldn't read real time\n"));
 	return timespec_to_ms(ts);
-}
-
-void *mymalloc(size_t num)
-{
-	return malloc(num);
 }
 
 bool string_match_case_insensitive(string x, string y)
@@ -3085,17 +2870,21 @@ bool load_file_contents(string file, string *out)
 				continue;
 			log_perror(LIT("read"));
 			close(fd);
-			free(str);
+			myfree(str, size);
 			return false;
 		}
 		if (n == 0)
 			break; // EOF
 		copied += n;
 	}
+	if (copied != size) {
+		log_format("Read %d bytes from file but %d were expected\n", copied, size);
+		return false;
+	}
 
 	close(fd);
 
-	*out = (string) {str, copied};
+	*out = (string) {str, size};
 	return true;
 }
 
@@ -3113,7 +2902,7 @@ void byte_queue_init(ByteQueue *q)
 
 void byte_queue_free(ByteQueue *q)
 {
-	free(q->data);
+	myfree(q->data, q->capacity);
 	byte_queue_init(q);
 }
 
@@ -3135,7 +2924,7 @@ bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
 			if (q->size > 0)
 				memcpy(data, q->data + q->head, q->size);
 
-			free(q->data);
+			myfree(q->data, q->capacity);
 			q->data = data;
 			q->capacity = capacity;
 
@@ -3425,6 +3214,58 @@ void timed_scope_result(int scope_index, uint64_t delta_cycles, string label)
 	timed_scopes[scope_index].label = label;
 	timed_scopes[scope_index].delta_cycles += delta_cycles;
 	timed_scopes[scope_index].exec_count++;
+}
+
+#endif
+
+#if EOPALLOC
+
+void *mymalloc(size_t num)
+{
+	int page_size = sysconf(_SC_PAGE_SIZE);
+
+	size_t num_pages = (num + page_size - 1) / page_size;
+	assert(num_pages > 0);
+
+	void *addr = mmap(NULL, (num_pages + 1) * page_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	if (addr == MAP_FAILED)
+		return NULL;
+
+	void *head_page = addr;
+	addr = (char*) addr + page_size;
+
+	if (mprotect(head_page, page_size, PROT_NONE)) {
+		log_perror(LIT("mprotect"));
+		exit(-1);
+	}
+	
+	return addr;
+}
+
+void myfree(void *ptr, size_t num)
+{
+	if (ptr == NULL)
+		return;
+
+	int page_size = sysconf(_SC_PAGE_SIZE);
+	size_t num_pages = (num + page_size - 1) / page_size;
+
+	void *head_page = (char*) ptr - page_size;
+
+	munmap(head_page, (num_pages + 1) * page_size);
+}
+
+#else
+
+void *mymalloc(size_t num)
+{
+	return malloc(num);
+}
+
+void myfree(void *ptr, size_t num)
+{
+	(void) num;
+	free(ptr);
 }
 
 #endif
