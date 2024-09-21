@@ -2401,15 +2401,17 @@ bool decode_pem(string src, PemArray *array)
 			extra_newline = false;
 		}
 	}
+
+	if (context2.buffer)
+		myfree(context2.buffer, context2.buffer_capacity);
+
 	if (context2.failed) {
 		myfree(po.name.data, po.name.size);
-		myfree(context2.buffer, context2.buffer_capacity);
 		free_pem_array(array);
 		return false;
 	}
 	if (inside_object) {
 		myfree(po.name.data, po.name.size);
-		myfree(context2.buffer, context2.buffer_capacity);
 		free_pem_array(array);
 		log_data(LIT("Unfinished PEM"));
 		return false;
