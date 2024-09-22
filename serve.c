@@ -1,5 +1,6 @@
+
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// Headers                                                                                 ///
+/// HEADERS                                                                                 ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 #include <stdio.h>
@@ -23,7 +24,7 @@
 #include <time.h>
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// Configuration                                                                           ///
+/// CONFIGURATION                                                                           ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 #ifndef HTTPS
@@ -62,8 +63,11 @@
 #define LOG_FLUSH_TIMEOUT_SEC   3
 #define INPUT_BUFFER_LIMIT_MB   1
 
+
+static_assert(LOG_BUFFER_SIZE < LOG_FILE_LIMIT, "");
+
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// Optional Headers                                                                        ///
+/// OPTIONAL HEADERS                                                                        ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 #if HTTPS
@@ -79,10 +83,8 @@
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// Types and definitions                                                                   ///
+/// TYPES & DEFINITIONS                                                                     ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
-
-static_assert(LOG_BUFFER_SIZE < LOG_FILE_LIMIT, "");
 
 typedef struct {
 	char  *data;
@@ -216,17 +218,17 @@ typedef struct {
 } ResponseBuilder;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// Forward Declarations                                                                    ///
+/// FORWARD DECLARATIONS                                                                    ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-void log_init(void);
-void log_free(void);
-void log_data(string str);
-void log_fatal(string str);
-void log_perror(string str);
-void log_format(const char *fmt, ...);
-void log_flush(void);
-bool log_empty(void);
+void   log_init(void);
+void   log_free(void);
+void   log_data(string str);
+void   log_fatal(string str);
+void   log_perror(string str);
+void   log_format(const char *fmt, ...);
+void   log_flush(void);
+bool   log_empty(void);
 
 void   byte_queue_init(ByteQueue *q);
 void   byte_queue_free(ByteQueue *q);
@@ -240,54 +242,54 @@ bool   byte_queue_write(ByteQueue *q, string src);
 void   byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
 
 #if PROFILE
-void timing_init(void);
-void print_timing_results(void);
-void timed_scope_result(int scope_index, uint64_t delta_cycles, string label);
+void   timing_init(void);
+void   print_timing_results(void);
+void   timed_scope_result(int scope_index, uint64_t delta_cycles, string label);
 #endif
 
 #if HTTPS
-bool load_private_key_from_file(string file, PrivateKey *pkey);
-void free_private_key(PrivateKey *pkey);
-bool load_certs_from_file(string file, CertArray *array);
-void free_certs(CertArray *array);
+bool   load_private_key_from_file(string file, PrivateKey *pkey);
+void   free_private_key(PrivateKey *pkey);
+bool   load_certs_from_file(string file, CertArray *array);
+void   free_certs(CertArray *array);
 BearSSLErrorInfo get_bearssl_error_info(int code);
 #endif
 
-char     to_lower(char c);
-bool     is_print(char c);
-bool     is_pcomp(char c);
-bool     is_digit(char c);
-bool     is_space(char c);
+char   to_lower(char c);
+bool   is_print(char c);
+bool   is_pcomp(char c);
+bool   is_digit(char c);
+bool   is_space(char c);
 
-string   trim(string s);
-string   substr(string str, size_t start, size_t end);
-bool     streq(string s1, string s2);
-bool     string_match_case_insensitive(string x, string y);
-bool     endswith(string suffix, string name);
-bool     startswith(string prefix, string str);
-void     print_bytes(string prefix, string str);
+string trim(string s);
+string substr(string str, size_t start, size_t end);
+bool   streq(string s1, string s2);
+bool   string_match_case_insensitive(string x, string y);
+bool   endswith(string suffix, string name);
+bool   startswith(string prefix, string str);
+void   print_bytes(string prefix, string str);
 
-void    *mymalloc(size_t num);
-void     myfree(void *ptr, size_t num);
+void  *mymalloc(size_t num);
+void   myfree(void *ptr, size_t num);
 
 uint64_t get_real_time_ms(void);
 uint64_t get_monotonic_time_ms(void);
 uint64_t get_monotonic_time_ns(void);
 
-bool     load_file_contents(string file, string *out);
-bool     set_blocking(int fd, bool blocking);
-bool     read_from_socket(int fd, ByteQueue *queue);
-bool     write_to_socket(int fd, ByteQueue *queue);
-int      create_listening_socket(int port);
+bool   load_file_contents(string file, string *out);
+bool   set_blocking(int fd, bool blocking);
+bool   read_from_socket(int fd, ByteQueue *queue);
+bool   write_to_socket(int fd, ByteQueue *queue);
+int    create_listening_socket(int port);
 
-void     status_line(ResponseBuilder *b, int status);
-void     add_header(ResponseBuilder *b, string header);
-void     add_header_f(ResponseBuilder *b, const char *fmt, ...);
-void     append_content_s(ResponseBuilder *b, string str);
-void     append_content_f(ResponseBuilder *b, const char *fmt, ...);
-string   append_content_start(ResponseBuilder *b, size_t cap);
-void     append_content_end(ResponseBuilder *b, size_t num);
-bool     serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot, string reqpath, string mime, bool enable_dir_listing);
+void   status_line(ResponseBuilder *b, int status);
+void   add_header(ResponseBuilder *b, string header);
+void   add_header_f(ResponseBuilder *b, const char *fmt, ...);
+void   append_content_s(ResponseBuilder *b, string str);
+void   append_content_f(ResponseBuilder *b, const char *fmt, ...);
+string append_content_start(ResponseBuilder *b, size_t cap);
+void   append_content_end(ResponseBuilder *b, size_t num);
+bool   serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot, string reqpath, string mime, bool enable_dir_listing);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// GLOBALS                                                                                 ///
@@ -401,7 +403,7 @@ void free_globals(void)
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// Response Callback                                                                       ///
+/// RESPONSE CALLBACK                                                                       ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 void respond(Request request, ResponseBuilder *b)
@@ -430,7 +432,7 @@ void respond(Request request, ResponseBuilder *b)
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
-/// HTTP Request Parser                                                                     ///
+/// REQUEST PARSER                                                                          ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 // TODO: Make sure every string in request is reasonaly long
@@ -720,10 +722,10 @@ int find_and_parse_transfer_encoding(Request *request)
 	size_t len = value.size;
 	size_t cur = 0;
 	for (;;) {
-		
+
 		while (cur < len && (is_space(src[cur]) || src[cur] == ','))
 			cur++;
-		
+
 		if (cur+6 < len
 			&& src[cur+0] == 'c'
 			&& src[cur+1] == 'h'
@@ -1828,8 +1830,7 @@ bool serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot,
 
 		struct dirent *dir;
 		while ((dir = readdir(d))) {
-			if (!strcmp(dir->d_name, ".") ||
-				!strcmp(dir->d_name, ".."))
+			if (!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
 				continue;
 			append_content_f(b, "<li><a href=\"\">%s</a></li>\n", dir->d_name); // TODO: Add links
 		}
@@ -1845,9 +1846,9 @@ bool serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot,
 	return false;
 }
 
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// LOGGER                                                                                  ///
+///////////////////////////////////////////////////////////////////////////////////////////////
 
 void log_choose_file_name(char *dst, size_t max, bool startup)
 {
@@ -1933,8 +1934,7 @@ void log_init(void)
 	struct dirent *dir;
 	while ((dir = readdir(d))) {
 
-		if (!strcmp(dir->d_name, ".") ||
-			!strcmp(dir->d_name, ".."))
+		if (!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
 			continue;
 
 		char path[1<<12];
@@ -2119,6 +2119,608 @@ void log_perror(string str)
 {
 	log_format("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// BASIC UTILITIES                                                                         ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+uint64_t timespec_to_ms(struct timespec ts)
+{
+	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000)
+		log_fatal(LIT("Time overflow\n"));
+	uint64_t ms = ts.tv_sec * 1000;
+
+	uint64_t nsec_part = ts.tv_nsec / 1000000;
+	if (ms > UINT64_MAX - nsec_part)
+		log_fatal(LIT("Time overflow\n"));
+	ms += nsec_part;
+	return ms;
+}
+
+uint64_t timespec_to_ns(struct timespec ts)
+{
+	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000000000)
+		log_fatal(LIT("Time overflow\n"));
+	uint64_t ns = ts.tv_sec * 1000000000;
+
+	if (ns > UINT64_MAX - ts.tv_nsec)
+		log_fatal(LIT("Time overflow\n"));
+	ns += ts.tv_nsec;
+	return ns;
+}
+
+uint64_t get_monotonic_time_ms(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
+	return timespec_to_ms(ts);
+}
+
+uint64_t get_monotonic_time_ns(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
+	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
+	return timespec_to_ns(ts);
+}
+
+uint64_t get_real_time_ms(void)
+{
+	struct timespec ts;
+	int ret = clock_gettime(CLOCK_REALTIME, &ts);
+	if (ret) log_fatal(LIT("Couldn't read real time\n"));
+	return timespec_to_ms(ts);
+}
+
+bool string_match_case_insensitive(string x, string y)
+{
+	if (x.size != y.size)
+		return false;
+	for (size_t i = 0; i < x.size; i++)
+		if (to_lower(x.data[i]) != to_lower(y.data[i]))
+			return false;
+	return true;
+}
+
+char to_lower(char c)
+{
+	if (c >= 'A' && c <= 'Z')
+		return c - 'A' + 'a';
+	else
+		return c;
+}
+
+string trim(string s)
+{
+	size_t cur = 0;
+	while (cur < s.size && is_space(s.data[cur]))
+		cur++;
+
+	if (cur == s.size) {
+		s.data = "";
+		s.size = 0;
+	} else {
+		s.data += cur;
+		s.size -= cur;
+		while (is_space(s.data[s.size-1]))
+			s.size--;
+	}
+	return s;
+}
+
+string substr(string str, size_t start, size_t end)
+{
+	return (string) {
+		.data = str.data + start,
+		.size = end - start,
+	};
+}
+
+bool is_digit(char c)
+{
+	return c >= '0' && c <= '9';
+}
+
+bool is_space(char c)
+{
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+bool is_print(char c)
+{
+	return c >= 32 && c < 127;
+}
+
+bool is_pcomp(char c)
+{
+	return c != '/' && c != ':' && is_print(c);
+}
+
+bool streq(string s1, string s2)
+{
+	// TODO: What is s1.data or s2.data is NULL?
+	return s1.size == s2.size && !memcmp(s1.data, s2.data, s1.size);
+}
+
+bool startswith(string prefix, string str)
+{
+	if (prefix.size > str.size)
+		return false;
+	// TODO: What is prefix.data==NULL or str.data==NULL?
+	return !memcmp(prefix.data, str.data, prefix.size);
+}
+
+bool endswith(string suffix, string name)
+{
+	char *tail = name.data + (name.size - suffix.size);
+	return suffix.size <= name.size && !memcmp(tail, suffix.data, suffix.size);
+}
+
+bool load_file_contents(string file, string *out)
+{
+	char copy[1<<12];
+	if (file.size >= sizeof(copy)) {
+		log_data(LIT("File path is larger than the static buffer\n"));
+		return false;
+	}
+	memcpy(copy, file.data, file.size);
+	copy[file.size] = '\0';
+
+	int fd = open(copy, O_RDONLY);
+	if (fd < 0)
+		return false;
+
+	struct stat buf;
+	if (fstat(fd, &buf) || !S_ISREG(buf.st_mode)) {
+		log_data(LIT("Couldn't stat file or it's not a regular file\n"));
+		close(fd);
+		return false;
+	}
+	size_t size = (size_t) buf.st_size;
+
+	char *str = mymalloc(size);
+	if (str == NULL) {
+		log_data(LIT("out of memory\n"));
+		close(fd);
+		return false;
+	}
+
+	size_t copied = 0;
+	while (copied < size) {
+		int n = read(fd, str + copied, size - copied);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			log_perror(LIT("read"));
+			close(fd);
+			myfree(str, size);
+			return false;
+		}
+		if (n == 0)
+			break; // EOF
+		copied += n;
+	}
+	if (copied != size) {
+		log_format("Read %d bytes from file but %d were expected\n", copied, size);
+		return false;
+	}
+
+	close(fd);
+
+	*out = (string) {str, size};
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// BYTE QUEUE                                                                              ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+void byte_queue_init(ByteQueue *q)
+{
+	q->data = NULL;
+	q->head = 0;
+	q->size = 0;
+	q->capacity = 0;
+}
+
+void byte_queue_free(ByteQueue *q)
+{
+	myfree(q->data, q->capacity);
+	byte_queue_init(q);
+}
+
+bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
+{
+	size_t total_free_space = q->capacity - q->size;
+	size_t free_space_after_data = q->capacity - q->size - q->head;
+
+	if (free_space_after_data < num) {
+		if (total_free_space < num) {
+			// Resize required
+
+			size_t capacity = 2 * q->capacity;
+			if (capacity - q->size < num) capacity = q->size + num;
+
+			char *data = mymalloc(capacity);
+			if (!data) return false;
+
+			if (q->size > 0)
+				memcpy(data, q->data + q->head, q->size);
+
+			myfree(q->data, q->capacity);
+			q->data = data;
+			q->capacity = capacity;
+
+		} else {
+			// Move required
+			memmove(q->data, q->data + q->head, q->size);
+			q->head = 0;
+		}
+	}
+
+	return true;
+}
+
+string byte_queue_start_write(ByteQueue *q)
+{
+	if (q->data == NULL)
+		return NULLSTR;
+	return (string) {
+		.data = q->data     + q->head + q->size,
+		.size = q->capacity - q->head - q->size,
+	};
+}
+
+void byte_queue_end_write(ByteQueue *q, size_t num)
+{
+	q->size += num;
+}
+
+string byte_queue_start_read(ByteQueue *q)
+{
+	if (q->data == NULL)
+		return NULLSTR;
+	return (string) {
+		.data = q->data + q->head,
+		.size = q->size,
+	};
+}
+
+size_t byte_queue_size(ByteQueue *q)
+{
+	return q->size;
+}
+
+void byte_queue_end_read(ByteQueue *q, size_t num)
+{
+	q->head += num;
+	q->size -= num;
+}
+
+bool byte_queue_write(ByteQueue *q, string src)
+{
+	if (!byte_queue_ensure_min_free_space(q, src.size))
+		return false;
+	string dst = byte_queue_start_write(q);
+	assert(dst.size >= src.size);
+	memcpy(dst.data, src.data, src.size);
+	byte_queue_end_write(q, src.size);
+	return true;
+}
+
+void byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len)
+{
+	// TODO: Safety checks
+	memcpy(q->data + q->head + offset, src, len);
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// SOCKET UTILITIES                                                                        ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+void print_bytes(string prefix, string str)
+{
+	char  *src = str.data;
+	size_t len = str.size;
+
+	bool line_start = true;
+
+	size_t i = 0;
+	while (i < len) {
+
+		size_t substr_offset = i;
+		while (i < len && src[i] != '\r' && src[i] != '\n')
+			i++;
+		size_t substr_length = i - substr_offset;
+
+		if (line_start) {
+			log_data(prefix);
+			line_start = false;
+		}
+
+		log_data((string) { src + substr_offset, substr_length });
+
+		if (i < len) {
+			if (src[i] == '\r')
+				log_data(LIT("\\r"));
+			else {
+				log_data(LIT("\\n\n"));
+				line_start = true;
+			}
+			i++;
+		}
+	}
+
+	if (!line_start)
+		log_data(LIT("\n"));
+}
+
+bool read_from_socket(int fd, ByteQueue *queue)
+{
+	bool remove = false;
+
+	for (;;) {
+
+		if (!byte_queue_ensure_min_free_space(queue, 512)) {
+			remove = true;
+			break;
+		}
+
+		string dst = byte_queue_start_write(queue);
+
+		int num = recv(fd, dst.data, dst.size, 0);
+		if (num < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+			log_perror(LIT("recv"));
+			remove = true;
+			break;
+		}
+		if (num == 0) {
+			remove = true;
+			break;
+		}
+#if SHOW_IO
+		print_bytes(LIT("> "), (string) {dst.data, num});
+#endif
+		byte_queue_end_write(queue, (size_t) num);
+
+		// Input buffer can't go over 20Mb
+		if (byte_queue_size(queue) > (size_t) INPUT_BUFFER_LIMIT_MB * 1024 * 1024) {
+			remove = true;
+			break;
+		}
+	}
+
+	return remove;
+}
+
+bool write_to_socket(int fd, ByteQueue *queue)
+{
+	bool remove = false;
+	for (;;) {
+
+		string src = byte_queue_start_read(queue);
+		if (src.size == 0) break;
+
+		int num = send(fd, src.data, src.size, 0);
+		if (num < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				break;
+			log_perror(LIT("send"));
+			remove = true;
+			break;
+		}
+
+#if SHOW_IO
+		print_bytes(LIT("< "), (string) {src.data, num});
+#endif
+		byte_queue_end_read(queue, (size_t) num);
+	}
+
+	return remove;
+}
+
+int create_listening_socket(int port)
+{
+	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (listen_fd < 0) {
+		log_perror(LIT("socket"));
+		return -1;
+	}
+
+	if (!set_blocking(listen_fd, false)) {
+		log_perror(LIT("fcntl"));
+		return -1;
+	}
+
+	int one = 1;
+	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
+
+	struct sockaddr_in addr;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
+		log_perror(LIT("bind"));
+		return -1;
+	}
+
+	if (listen(listen_fd, 32)) {
+		log_perror(LIT("listen"));
+		return -1;
+	}
+
+	return listen_fd;
+}
+
+bool set_blocking(int fd, bool blocking)
+{
+	int flags = fcntl(fd, F_GETFL, 0);
+
+	if (flags == -1)
+		return false;
+
+	if (blocking)
+		flags &= ~O_NONBLOCK;
+	else
+		flags |= O_NONBLOCK;
+
+	if (fcntl(fd, F_SETFL, flags))
+		return false;
+
+	return true;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// PROFILING                                                                               ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+#if PROFILE
+typedef struct {
+	string label;
+	uint64_t delta_cycles;
+	uint64_t exec_count;
+} TimedScope;
+
+TimedScope timed_scopes[__COUNTER__+1]; // +1 is just to avoid the zero length array
+uint64_t timing_init_time_ns;
+uint64_t timing_init_time_cycles;
+
+void timing_init(void)
+{
+	timing_init_time_ns = get_monotonic_time_ns();
+	timing_init_time_cycles = __rdtsc();
+}
+
+void human_readable_time_interval(uint64_t ns, char *dst, size_t max)
+{
+    if (ns > 1000000000)
+        snprintf(dst, max, "%.1Lf s", (long double) ns / 1000000000);
+    else if (ns > 1000000)
+        snprintf(dst, max, "%.1Lf ms", (long double) ns / 1000000);
+    else if (ns > 1000)
+        snprintf(dst, max, "%.1Lf us", (long double) ns / 1000);
+    else
+        snprintf(dst, max, "%.1Lf ns", (long double) ns);
+}
+
+void print_timing_results(void)
+{
+	uint64_t end_cycles = __rdtsc();
+	uint64_t end_ns = get_monotonic_time_ns();
+
+	double cy2ns = (double) (end_ns - timing_init_time_ns) / (end_cycles - timing_init_time_cycles);
+
+	printf("Printing timing results\n");
+	for (int i = 0; i < COUNTOF(timed_scopes); i++) {
+		TimedScope scope = timed_scopes[i];
+		if (scope.exec_count == 0)
+			continue;
+
+		char total_str[128];
+		char average_str[128];
+		human_readable_time_interval(cy2ns * scope.delta_cycles, total_str, sizeof(total_str));
+		human_readable_time_interval(cy2ns * scope.delta_cycles / scope.exec_count, average_str, sizeof(average_str));
+
+		printf("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
+			(int) scope.label.size, scope.label.data,
+			total_str, average_str, scope.exec_count);
+	}
+}
+
+void timed_scope_result(int scope_index, uint64_t delta_cycles, string label)
+{
+	timed_scopes[scope_index].label = label;
+	timed_scopes[scope_index].delta_cycles += delta_cycles;
+	timed_scopes[scope_index].exec_count++;
+}
+#endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// ALLOCATORS                                                                              ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+#if EOPALLOC
+void *mymalloc(size_t num)
+{
+	int page_size = sysconf(_SC_PAGE_SIZE);
+
+	size_t num_pages = (num + page_size - 1) / page_size;
+	assert(num_pages > 0);
+
+	void *addr = mmap(NULL, (num_pages + 1) * page_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+	if (addr == MAP_FAILED)
+		return NULL;
+
+	void *head_page = addr;
+	addr = (char*) addr + page_size;
+
+	if (mprotect(head_page, page_size, PROT_NONE)) {
+		log_perror(LIT("mprotect"));
+		exit(-1);
+	}
+
+	return addr;
+}
+
+void myfree(void *ptr, size_t num)
+{
+	if (ptr == NULL)
+		return;
+
+	int page_size = sysconf(_SC_PAGE_SIZE);
+	size_t num_pages = (num + page_size - 1) / page_size;
+
+	void *head_page = (char*) ptr - page_size;
+
+	munmap(head_page, (num_pages + 1) * page_size);
+}
+
+#else
+
+void *mymalloc(size_t num)
+{
+	return malloc(num);
+}
+
+void myfree(void *ptr, size_t num)
+{
+	(void) num;
+	free(ptr);
+}
+#endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// CERTIFICATE AND PRIVATE KEY PARSING (Adapted from BearSSL)                              ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Copyright (c) 2016 Thomas Pornin <pornin@bolet.org>                                     ///
+///                                                                                         ///
+/// Permission is hereby granted, free of charge, to any person obtaining                   ///
+/// a copy of this software and associated documentation files (the                         ///
+/// "Software"), to deal in the Software without restriction, including                     ///
+/// without limitation the rights to use, copy, modify, merge, publish,                     ///
+/// distribute, sublicense, and/or sell copies of the Software, and to                      ///
+/// permit persons to whom the Software is furnished to do so, subject to                   ///
+/// the following conditions:                                                               ///
+///                                                                                         ///
+/// The above copyright notice and this permission notice shall be                          ///
+/// included in all copies or substantial portions of the Software.                         ///
+///                                                                                         ///
+/// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,                         ///
+/// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF                      ///
+/// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND                                   ///
+/// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS                     ///
+/// BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN                      ///
+/// ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN                       ///
+/// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE                        ///
+/// SOFTWARE.                                                                               ///
+///////////////////////////////////////////////////////////////////////////////////////////////
 
 #if HTTPS
 BearSSLErrorInfo bearssl_error_table[] = {
@@ -2712,569 +3314,3 @@ void free_certs(CertArray *array)
 	myfree(array->items, array->capacity * sizeof(br_x509_certificate));
 }
 #endif /* HTTPS */
-
-uint64_t timespec_to_ms(struct timespec ts)
-{
-	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000)
-		log_fatal(LIT("Time overflow\n"));
-	uint64_t ms = ts.tv_sec * 1000;
-
-	uint64_t nsec_part = ts.tv_nsec / 1000000;
-	if (ms > UINT64_MAX - nsec_part)
-		log_fatal(LIT("Time overflow\n"));
-	ms += nsec_part;
-	return ms;
-}
-
-uint64_t timespec_to_ns(struct timespec ts)
-{
-	if ((uint64_t) ts.tv_sec > UINT64_MAX / 1000000000)
-		log_fatal(LIT("Time overflow\n"));
-	uint64_t ns = ts.tv_sec * 1000000000;
-
-	if (ns > UINT64_MAX - ts.tv_nsec)
-		log_fatal(LIT("Time overflow\n"));
-	ns += ts.tv_nsec;
-	return ns;
-}
-
-uint64_t get_monotonic_time_ms(void)
-{
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
-	return timespec_to_ms(ts);
-}
-
-uint64_t get_monotonic_time_ns(void)
-{
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_MONOTONIC, &ts);
-	if (ret) log_fatal(LIT("Couldn't read monotonic time\n"));
-	return timespec_to_ns(ts);
-}
-
-uint64_t get_real_time_ms(void)
-{
-	struct timespec ts;
-	int ret = clock_gettime(CLOCK_REALTIME, &ts);
-	if (ret) log_fatal(LIT("Couldn't read real time\n"));
-	return timespec_to_ms(ts);
-}
-
-bool string_match_case_insensitive(string x, string y)
-{
-	if (x.size != y.size)
-		return false;
-	for (size_t i = 0; i < x.size; i++)
-		if (to_lower(x.data[i]) != to_lower(y.data[i]))
-			return false;
-	return true;
-}
-
-char to_lower(char c)
-{
-	if (c >= 'A' && c <= 'Z')
-		return c - 'A' + 'a';
-	else
-		return c;
-}
-
-string trim(string s)
-{
-	size_t cur = 0;
-	while (cur < s.size && is_space(s.data[cur]))
-		cur++;
-
-	if (cur == s.size) {
-		s.data = "";
-		s.size = 0;
-	} else {
-		s.data += cur;
-		s.size -= cur;
-		while (is_space(s.data[s.size-1]))
-			s.size--;
-	}
-	return s;
-}
-
-string substr(string str, size_t start, size_t end)
-{
-	return (string) {
-		.data = str.data + start,
-		.size = end - start,
-	};
-}
-
-bool is_digit(char c)
-{
-	return c >= '0' && c <= '9';
-}
-
-bool is_space(char c)
-{
-	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-bool is_print(char c)
-{
-	return c >= 32 && c < 127;
-}
-
-bool is_pcomp(char c)
-{
-	return c != '/' && c != ':' && is_print(c);
-}
-
-bool streq(string s1, string s2)
-{
-	// TODO: What is s1.data or s2.data is NULL?
-	return s1.size == s2.size && !memcmp(s1.data, s2.data, s1.size);
-}
-
-bool startswith(string prefix, string str)
-{
-	if (prefix.size > str.size)
-		return false;
-	// TODO: What is prefix.data==NULL or str.data==NULL?
-	return !memcmp(prefix.data, str.data, prefix.size);
-}
-
-bool endswith(string suffix, string name)
-{
-	char *tail = name.data + (name.size - suffix.size);
-	return suffix.size <= name.size && !memcmp(tail, suffix.data, suffix.size);
-}
-
-bool load_file_contents(string file, string *out)
-{
-	char copy[1<<12];
-	if (file.size >= sizeof(copy)) {
-		log_data(LIT("File path is larger than the static buffer\n"));
-		return false;
-	}
-	memcpy(copy, file.data, file.size);
-	copy[file.size] = '\0';
-
-	int fd = open(copy, O_RDONLY);
-	if (fd < 0)
-		return false;
-
-	struct stat buf;
-	if (fstat(fd, &buf) || !S_ISREG(buf.st_mode)) {
-		log_data(LIT("Couldn't stat file or it's not a regular file\n"));
-		close(fd);
-		return false;
-	}
-	size_t size = (size_t) buf.st_size;
-
-	char *str = mymalloc(size);
-	if (str == NULL) {
-		log_data(LIT("out of memory\n"));
-		close(fd);
-		return false;
-	}
-
-	size_t copied = 0;
-	while (copied < size) {
-		int n = read(fd, str + copied, size - copied);
-		if (n < 0) {
-			if (errno == EINTR)
-				continue;
-			log_perror(LIT("read"));
-			close(fd);
-			myfree(str, size);
-			return false;
-		}
-		if (n == 0)
-			break; // EOF
-		copied += n;
-	}
-	if (copied != size) {
-		log_format("Read %d bytes from file but %d were expected\n", copied, size);
-		return false;
-	}
-
-	close(fd);
-
-	*out = (string) {str, size};
-	return true;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-
-void byte_queue_init(ByteQueue *q)
-{
-	q->data = NULL;
-	q->head = 0;
-	q->size = 0;
-	q->capacity = 0;
-}
-
-void byte_queue_free(ByteQueue *q)
-{
-	myfree(q->data, q->capacity);
-	byte_queue_init(q);
-}
-
-bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
-{
-	size_t total_free_space = q->capacity - q->size;
-	size_t free_space_after_data = q->capacity - q->size - q->head;
-
-	if (free_space_after_data < num) {
-		if (total_free_space < num) {
-			// Resize required
-
-			size_t capacity = 2 * q->capacity;
-			if (capacity - q->size < num) capacity = q->size + num;
-
-			char *data = mymalloc(capacity);
-			if (!data) return false;
-
-			if (q->size > 0)
-				memcpy(data, q->data + q->head, q->size);
-
-			myfree(q->data, q->capacity);
-			q->data = data;
-			q->capacity = capacity;
-
-		} else {
-			// Move required
-			memmove(q->data, q->data + q->head, q->size);
-			q->head = 0;
-		}
-	}
-
-	return true;
-}
-
-string byte_queue_start_write(ByteQueue *q)
-{
-	if (q->data == NULL)
-		return NULLSTR;
-	return (string) {
-		.data = q->data     + q->head + q->size,
-		.size = q->capacity - q->head - q->size,
-	};
-}
-
-void byte_queue_end_write(ByteQueue *q, size_t num)
-{
-	q->size += num;
-}
-
-string byte_queue_start_read(ByteQueue *q)
-{
-	if (q->data == NULL)
-		return NULLSTR;
-	return (string) {
-		.data = q->data + q->head,
-		.size = q->size,
-	};
-}
-
-size_t byte_queue_size(ByteQueue *q)
-{
-	return q->size;
-}
-
-void byte_queue_end_read(ByteQueue *q, size_t num)
-{
-	q->head += num;
-	q->size -= num;
-}
-
-bool byte_queue_write(ByteQueue *q, string src)
-{
-	if (!byte_queue_ensure_min_free_space(q, src.size))
-		return false;
-	string dst = byte_queue_start_write(q);
-	assert(dst.size >= src.size);
-	memcpy(dst.data, src.data, src.size);
-	byte_queue_end_write(q, src.size);
-	return true;
-}
-
-void byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len)
-{
-	// TODO: Safety checks
-	memcpy(q->data + q->head + offset, src, len);
-}
-
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////////////////
-
-void print_bytes(string prefix, string str)
-{
-	char  *src = str.data;
-	size_t len = str.size;
-
-	bool line_start = true;
-
-	size_t i = 0;
-	while (i < len) {
-
-		size_t substr_offset = i;
-		while (i < len && src[i] != '\r' && src[i] != '\n')
-			i++;
-		size_t substr_length = i - substr_offset;
-
-		if (line_start) {
-			log_data(prefix);
-			line_start = false;
-		}
-
-		log_data((string) { src + substr_offset, substr_length });
-
-		if (i < len) {
-			if (src[i] == '\r')
-				log_data(LIT("\\r"));
-			else {
-				log_data(LIT("\\n\n"));
-				line_start = true;
-			}
-			i++;
-		}
-	}
-
-	if (!line_start)
-		log_data(LIT("\n"));
-}
-
-bool read_from_socket(int fd, ByteQueue *queue)
-{
-	bool remove = false;
-
-	for (;;) {
-
-		if (!byte_queue_ensure_min_free_space(queue, 512)) {
-			remove = true;
-			break;
-		}
-
-		string dst = byte_queue_start_write(queue);
-
-		int num = recv(fd, dst.data, dst.size, 0);
-		if (num < 0) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				break;
-			log_perror(LIT("recv"));
-			remove = true;
-			break;
-		}
-		if (num == 0) {
-			remove = true;
-			break;
-		}
-#if SHOW_IO
-		print_bytes(LIT("> "), (string) {dst.data, num});
-#endif
-		byte_queue_end_write(queue, (size_t) num);
-
-		// Input buffer can't go over 20Mb
-		if (byte_queue_size(queue) > (size_t) INPUT_BUFFER_LIMIT_MB * 1024 * 1024) {
-			remove = true;
-			break;
-		}
-	}
-
-	return remove;
-}
-
-bool write_to_socket(int fd, ByteQueue *queue)
-{
-	bool remove = false;
-	for (;;) {
-
-		string src = byte_queue_start_read(queue);
-		if (src.size == 0) break;
-
-		int num = send(fd, src.data, src.size, 0);
-		if (num < 0) {
-			if (errno == EINTR)
-				continue;
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				break;
-			log_perror(LIT("send"));
-			remove = true;
-			break;
-		}
-
-#if SHOW_IO
-		print_bytes(LIT("< "), (string) {src.data, num});
-#endif
-		byte_queue_end_read(queue, (size_t) num);
-	}
-
-	return remove;
-}
-
-int create_listening_socket(int port)
-{
-	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (listen_fd < 0) {
-		log_perror(LIT("socket"));
-		return -1;
-	}
-
-	if (!set_blocking(listen_fd, false)) {
-		log_perror(LIT("fcntl"));
-		return -1;
-	}
-
-	int one = 1;
-	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
-
-	struct sockaddr_in addr;
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
-		log_perror(LIT("bind"));
-		return -1;
-	}
-
-	if (listen(listen_fd, 32)) {
-		log_perror(LIT("listen"));
-		return -1;
-	}
-
-	return listen_fd;
-}
-
-bool set_blocking(int fd, bool blocking)
-{
-	int flags = fcntl(fd, F_GETFL, 0);
-
-	if (flags == -1)
-		return false;
-
-	if (blocking) flags &= ~O_NONBLOCK;
-	else          flags |= O_NONBLOCK;
-
-	if (fcntl(fd, F_SETFL, flags))
-		return false;
-
-	return true;
-}
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-/// Profiling                                                                               ///
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-#if PROFILE
-typedef struct {
-	string label;
-	uint64_t delta_cycles;
-	uint64_t exec_count;
-} timed_scope_t;
-
-timed_scope_t timed_scopes[__COUNTER__+1]; // +1 is just to avoid the zero length array
-uint64_t timing_init_time_ns;
-uint64_t timing_init_time_cycles;
-
-void timing_init(void)
-{
-	timing_init_time_ns = get_monotonic_time_ns();
-	timing_init_time_cycles = __rdtsc();
-}
-
-void human_readable_time_interval(uint64_t ns, char *dst, size_t max)
-{
-    if (ns > 1000000000)
-        snprintf(dst, max, "%.1Lf s", (long double) ns / 1000000000);
-    else if (ns > 1000000)
-        snprintf(dst, max, "%.1Lf ms", (long double) ns / 1000000);
-    else if (ns > 1000)
-        snprintf(dst, max, "%.1Lf us", (long double) ns / 1000);
-    else
-        snprintf(dst, max, "%.1Lf ns", (long double) ns);
-}
-
-void print_timing_results(void)
-{
-	uint64_t end_cycles = __rdtsc();
-	uint64_t end_ns = get_monotonic_time_ns();
-
-	double cy2ns = (double) (end_ns - timing_init_time_ns) / (end_cycles - timing_init_time_cycles);
-
-	printf("Printing timing results\n");
-	for (int i = 0; i < COUNTOF(timed_scopes); i++) {
-		timed_scope_t scope = timed_scopes[i];
-		if (scope.exec_count == 0)
-			continue;
-
-		char total_str[128];
-		char average_str[128];
-		human_readable_time_interval(cy2ns * scope.delta_cycles, total_str, sizeof(total_str));
-		human_readable_time_interval(cy2ns * scope.delta_cycles / scope.exec_count, average_str, sizeof(average_str));
-
-		printf("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
-			(int) scope.label.size, scope.label.data,
-			total_str, average_str, scope.exec_count);
-	}
-}
-
-void timed_scope_result(int scope_index, uint64_t delta_cycles, string label)
-{
-	timed_scopes[scope_index].label = label;
-	timed_scopes[scope_index].delta_cycles += delta_cycles;
-	timed_scopes[scope_index].exec_count++;
-}
-#endif
-
-#if EOPALLOC
-void *mymalloc(size_t num)
-{
-	int page_size = sysconf(_SC_PAGE_SIZE);
-
-	size_t num_pages = (num + page_size - 1) / page_size;
-	assert(num_pages > 0);
-
-	void *addr = mmap(NULL, (num_pages + 1) * page_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
-	if (addr == MAP_FAILED)
-		return NULL;
-
-	void *head_page = addr;
-	addr = (char*) addr + page_size;
-
-	if (mprotect(head_page, page_size, PROT_NONE)) {
-		log_perror(LIT("mprotect"));
-		exit(-1);
-	}
-
-	return addr;
-}
-
-void myfree(void *ptr, size_t num)
-{
-	if (ptr == NULL)
-		return;
-
-	int page_size = sysconf(_SC_PAGE_SIZE);
-	size_t num_pages = (num + page_size - 1) / page_size;
-
-	void *head_page = (char*) ptr - page_size;
-
-	munmap(head_page, (num_pages + 1) * page_size);
-}
-
-#else
-
-void *mymalloc(size_t num)
-{
-	return malloc(num);
-}
-
-void myfree(void *ptr, size_t num)
-{
-	(void) num;
-	free(ptr);
-}
-#endif
