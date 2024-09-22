@@ -16,7 +16,6 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <stdbool.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -36,7 +35,7 @@
 #define HTTPS_PORT 443
 #define MAX_CONNECTIONS (1024-2)
 #define LOG_BUFFER_SIZE (1<<20)
-#define LOG_FILE_LIMIT (1<<24)
+#define LOG_FILE_LIMIT  (1<<24)
 #define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
 #else
 #define PORT 8080
@@ -73,6 +72,10 @@
 
 #if PROFILE
 #include <x86intrin.h>
+#endif
+
+#if EOPALLOC
+#include <sys/mman.h>
 #endif
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -250,28 +253,41 @@ void free_certs(CertArray *array);
 BearSSLErrorInfo get_bearssl_error_info(int code);
 #endif
 
-char   to_lower(char c);
-bool   is_print(char c);
-bool   is_pcomp(char c);
-bool   is_digit(char c);
-bool   is_space(char c);
-string trim(string s);
-string substr(string str, size_t start, size_t end);
-bool   streq(string s1, string s2);
-bool   string_match_case_insensitive(string x, string y);
-bool   endswith(string suffix, string name);
-bool   startswith(string prefix, string str);
-void   print_bytes(string prefix, string str);
-void  *mymalloc(size_t num);
-void   myfree(void *ptr, size_t num);
+char     to_lower(char c);
+bool     is_print(char c);
+bool     is_pcomp(char c);
+bool     is_digit(char c);
+bool     is_space(char c);
+
+string   trim(string s);
+string   substr(string str, size_t start, size_t end);
+bool     streq(string s1, string s2);
+bool     string_match_case_insensitive(string x, string y);
+bool     endswith(string suffix, string name);
+bool     startswith(string prefix, string str);
+void     print_bytes(string prefix, string str);
+
+void    *mymalloc(size_t num);
+void     myfree(void *ptr, size_t num);
+
 uint64_t get_real_time_ms(void);
 uint64_t get_monotonic_time_ms(void);
 uint64_t get_monotonic_time_ns(void);
-bool   load_file_contents(string file, string *out);
-bool   set_blocking(int fd, bool blocking);
-bool   read_from_socket(int fd, ByteQueue *queue);
-bool   write_to_socket(int fd, ByteQueue *queue);
-int    create_listening_socket(int port);
+
+bool     load_file_contents(string file, string *out);
+bool     set_blocking(int fd, bool blocking);
+bool     read_from_socket(int fd, ByteQueue *queue);
+bool     write_to_socket(int fd, ByteQueue *queue);
+int      create_listening_socket(int port);
+
+void     status_line(ResponseBuilder *b, int status);
+void     add_header(ResponseBuilder *b, string header);
+void     add_header_f(ResponseBuilder *b, const char *fmt, ...);
+void     append_content_s(ResponseBuilder *b, string str);
+void     append_content_f(ResponseBuilder *b, const char *fmt, ...);
+string   append_content_start(ResponseBuilder *b, size_t cap);
+void     append_content_end(ResponseBuilder *b, size_t num);
+bool     serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot, string reqpath, string mime, bool enable_dir_listing);
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// GLOBALS                                                                                 ///
@@ -382,6 +398,35 @@ void free_globals(void)
 	log_data(LIT("closing\n"));
 
 	log_free();
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// Response Callback                                                                       ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+void respond(Request request, ResponseBuilder *b)
+{
+	if (request.major != 1 || request.minor > 1) {
+		status_line(b, 505); // HTTP Version Not Supported
+		return;
+	}
+
+	if (request.method != M_GET) {
+		status_line(b, 405); // Method Not Allowed
+		return;
+	}
+
+	if (string_match_case_insensitive(request.path, LIT("/hello"))) {
+		status_line(b, 200);
+		append_content_s(b, LIT("Hello, world!"));
+		return;
+	}
+
+	if (serve_file_or_dir(b, LIT("/"), LIT("docroot/"), request.path, NULLSTR, false))
+		return;
+
+	status_line(b, 404);
+	append_content_s(b, LIT("Nothing here :|"));
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -795,7 +840,6 @@ void append_special_headers(ResponseBuilder *b)
 		add_header(b, LIT("Connection: Close"));
 		b->conn->closing = true;
 		b->conn->start_time = now;
-		// TODO: Stop monitoring POLLIN
 	}
 
 	b->content_length_offset = byte_queue_size(&b->conn->output) + sizeof("Content-Length: ") - 1;
@@ -907,8 +951,6 @@ void response_builder_complete(ResponseBuilder *b)
 
 	b->state = R_COMPLETE;
 }
-
-void respond(Request request, ResponseBuilder *b);
 
 bool should_keep_alive(Connection *conn)
 {
@@ -1483,34 +1525,6 @@ int main(int argc, char **argv)
 
 	free_globals();
 	return 0;
-}
-
-bool serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot,
-	string reqpath, string mime, bool enable_dir_listing);
-
-void respond(Request request, ResponseBuilder *b)
-{
-	if (request.major != 1 || request.minor > 1) {
-		status_line(b, 505); // HTTP Version Not Supported
-		return;
-	}
-
-	if (request.method != M_GET) {
-		status_line(b, 405); // Method Not Allowed
-		return;
-	}
-
-	if (string_match_case_insensitive(request.path, LIT("/hello"))) {
-		status_line(b, 200);
-		append_content_s(b, LIT("Hello, world!"));
-		return;
-	}
-
-	if (serve_file_or_dir(b, LIT("/"), LIT("docroot/"), request.path, NULLSTR, false))
-		return;
-
-	status_line(b, 404);
-	append_content_s(b, LIT("Nothing here :|"));
 }
 
 #define PATH_SEP '/'
@@ -2107,7 +2121,6 @@ void log_perror(string str)
 }
 
 #if HTTPS
-
 BearSSLErrorInfo bearssl_error_table[] = {
 	{ BR_ERR_BAD_PARAM,                LIT("BR_ERR_BAD_PARAM"),                LIT("Caller-provided parameter is incorrect.") },
 	{ BR_ERR_BAD_STATE,                LIT("BR_ERR_BAD_STATE"),                LIT("Operation requested by the caller cannot be applied with the current context state (e.g. reading data while outgoing data is waiting to be sent).") },
@@ -2698,7 +2711,6 @@ void free_certs(CertArray *array)
 	}
 	myfree(array->items, array->capacity * sizeof(br_x509_certificate));
 }
-
 #endif /* HTTPS */
 
 uint64_t timespec_to_ms(struct timespec ts)
@@ -3157,7 +3169,6 @@ bool set_blocking(int fd, bool blocking)
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
 #if PROFILE
-
 typedef struct {
 	string label;
 	uint64_t delta_cycles;
@@ -3216,11 +3227,9 @@ void timed_scope_result(int scope_index, uint64_t delta_cycles, string label)
 	timed_scopes[scope_index].delta_cycles += delta_cycles;
 	timed_scopes[scope_index].exec_count++;
 }
-
 #endif
 
 #if EOPALLOC
-
 void *mymalloc(size_t num)
 {
 	int page_size = sysconf(_SC_PAGE_SIZE);
@@ -3268,5 +3277,4 @@ void myfree(void *ptr, size_t num)
 	(void) num;
 	free(ptr);
 }
-
 #endif
