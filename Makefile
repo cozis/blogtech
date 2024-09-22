@@ -2,10 +2,10 @@
 
 HTTPS ?= 0
 
-COMMON_FLAGS   = -Wall -Wextra -DHTTPS=$(HTTPS)
-DEBUG_FLAGS    = -O0 -ggdb -fsanitize=address,undefined
+COMMON_FLAGS   = -Wall -Wextra -DHTTPS=$(HTTPS) -ggdb -rdynamic
+DEBUG_FLAGS    = -O0 -ggdb #-fsanitize=address,undefined
 COVERAGE_FLAGS =  -fprofile-arcs -ftest-coverage -lgcov
-RELEASE_FLAGS  = -O2 -DNDEBUG -DRELEASE
+RELEASE_FLAGS  = -ggdb -O2 -DNDEBUG -DRELEASE
 
 ifneq ($(HTTPS),0)
 	COMMON_FLAGS += -l:libbearssl.a -I3p/BearSSL/inc -L3p/BearSSL/build

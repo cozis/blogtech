@@ -9,3 +9,4 @@ logs/log_*.txt
 logs
 report
 3p
+backtrace.txt
