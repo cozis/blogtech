@@ -2453,7 +2453,9 @@ bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
 				memcpy(data, q->data + q->head, q->size);
 
 			myfree(q->data, q->capacity);
+
 			q->data = data;
+			q->head = 0;
 			q->capacity = capacity;
 
 		} else {
