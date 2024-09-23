@@ -1235,7 +1235,7 @@ bool respond_to_available_requests(Connection *conn)
 	return remove;
 }
 
-void build_poll_array(struct pollfd pollarray[static MAX_CONNECTIONS+2])
+void build_poll_array(struct pollfd pollarray[static MAX_CONNECTIONS+2], int *timeout)
 {
 	pollarray[0].fd = insecure_fd;
 	pollarray[0].events = (num_conns < MAX_CONNECTIONS ? POLLIN : 0);
@@ -1251,30 +1251,48 @@ void build_poll_array(struct pollfd pollarray[static MAX_CONNECTIONS+2])
 	pollarray[1].revents = 0;
 #endif
 
+	Connection *oldest = NULL;
+
 	for (int i = 0; i < MAX_CONNECTIONS; i++) {
 
 		Connection *conn = &conns[i];
 
 		int events = 0;
 
-		if (conn->fd != -1) {
-			if (conn->https) {
+		if (conn->fd == -1) {
+			pollarray[i+2].fd = -1;
+			pollarray[i+2].events = 0;
+			pollarray[i+2].revents = 0;
+			continue;
+		}
+
+		if (conn->https) {
 #if HTTPS
-				int state = br_ssl_engine_current_state(&conn->https_context.eng);
-				if (state & BR_SSL_SENDREC) events |= POLLOUT;
-				if (state & BR_SSL_RECVREC) events |= POLLIN;
+			int state = br_ssl_engine_current_state(&conn->https_context.eng);
+			if (state & BR_SSL_SENDREC) events |= POLLOUT;
+			if (state & BR_SSL_RECVREC) events |= POLLIN;
 #endif
-			} else {
-				if (byte_queue_size(&conn->output) > 0)
-					events |= POLLOUT;
-				if (!conn->closing)
-					events |= POLLIN;
-			}
+		} else {
+			if (byte_queue_size(&conn->output) > 0)
+				events |= POLLOUT;
+			if (!conn->closing)
+				events |= POLLIN;
 		}
 
 		pollarray[i+2].fd = conn->fd;
 		pollarray[i+2].events = events;
 		pollarray[i+2].revents = 0;
+
+		if (oldest == NULL || deadline_of(oldest) > deadline_of(conn)) oldest = conn;
+	}
+
+	if (oldest == NULL)
+		*timeout = -1;
+	else {
+		if (deadline_of(oldest) < now)
+			*timeout = 0;
+		else
+			*timeout = deadline_of(oldest) - now;
 	}
 }
 
@@ -1528,11 +1546,19 @@ int main(int argc, char **argv)
 	DEBUG("Globals initialized\n");
 
 	uint64_t last_log_time = 0;
-	int timeout =  log_empty() ? -1 : LOG_FLUSH_TIMEOUT_SEC * 1000;
 	while (!stop) {
 
+		int timeout;
 		struct pollfd pollarray[MAX_CONNECTIONS+2];
-		build_poll_array(pollarray);
+		build_poll_array(pollarray, &timeout);
+
+		if (!log_empty()) {
+			int log_timeout = (last_log_time + LOG_FLUSH_TIMEOUT_SEC * 1000) - now;
+			if (timeout < 0)
+				timeout = log_timeout;
+			else
+				timeout = MIN(log_timeout, timeout);
+		}
 
 		int ret = poll(pollarray, MAX_CONNECTIONS+2, timeout);
 		if (ret < 0) {
@@ -1553,12 +1579,11 @@ int main(int argc, char **argv)
 			while (accept_connection(secure_fd, true));
 #endif
 
-		Connection *oldest = NULL;
-
 		for (int i = 0; i < MAX_CONNECTIONS; i++) {
 
 			Connection *conn = &conns[i];
-			if (conn->fd == -1) continue;
+			if (conn->fd == -1)
+				continue;
 
 			struct pollfd *polldata = &pollarray[i+2];
 			bool remove = false;
@@ -1595,8 +1620,6 @@ int main(int argc, char **argv)
 			if (remove) {
 				free_connection(conn);
 				num_conns--;
-			} else {
-				if (oldest == NULL || deadline_of(oldest) > deadline_of(conn)) oldest = conn;
 			}
 		}
 
@@ -1605,23 +1628,6 @@ int main(int argc, char **argv)
 			last_log_time = now;
 		}
 
-		/*
-		 * Calculate the timeout for the next poll
-		 */
-		if (log_empty()) {
-			if (oldest == NULL)
-				timeout = -1;
-			else {
-				if (deadline_of(oldest) < now) timeout = 0;
-				else timeout = deadline_of(oldest) - now;
-			}
-		} else {
-			uint64_t deadline = last_log_time + LOG_FLUSH_TIMEOUT_SEC * 1000;
-			if (oldest && deadline > deadline_of(oldest))
-				deadline = deadline_of(oldest);
-			if (deadline < now) timeout = 0;
-			else timeout = deadline - now;
-		}
 	} /* main loop end */
 
 	free_globals();
@@ -1880,7 +1886,7 @@ bool serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot,
 			close(fd);
 			return true;
 		}
-		
+
 		status_line(b, 200);
 
 		if (mime.size == 0) mime = mimetype_from_filename(path);
@@ -2438,8 +2444,7 @@ bool byte_queue_ensure_min_free_space(ByteQueue *q, size_t num)
 		if (total_free_space < num) {
 			// Resize required
 
-			size_t capacity = 2 * q->capacity;
-			if (capacity - q->size < num) capacity = q->size + num;
+			size_t capacity = MAX(2 * q->capacity, q->size + num);
 
 			char *data = mymalloc(capacity);
 			if (!data) return false;
@@ -2466,8 +2471,8 @@ string byte_queue_start_write(ByteQueue *q)
 	if (q->data == NULL)
 		return NULLSTR;
 	return (string) {
-		.data = q->data     + q->head + q->size,
-		.size = q->capacity - q->head - q->size,
+		.data = q->data     + (q->head + q->size),
+		.size = q->capacity - (q->head + q->size),
 	};
 }
 
