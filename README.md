@@ -1,7 +1,10 @@
 # My Blog Technology
-This is a minimal web server designed to serve my blog. I'm writing it to be robust enough to face the public internet. You can see it in action at http://playin.coz.is/index.html.
+This is a minimal web server designed to serve my blog. I'm writing it to be robust enough to face the public internet. No need for reverse proxies! You can see it in action at http://playin.coz.is/index.html.
 
 I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_my_c_web_server_to_host_a_blog_you_cant/) to [hack](https://www.reddit.com/r/hacking/comments/1fcc5hd/im_using_my_custom_c_webserver_to_host_my_blog_no/) me, which resulted in gigabytes and gigabytes of very funny and malicious request logs. I copied a couple into `attempts.txt`. Maybe one day I'll go over the logs to get some new ones :^)
+
+# But.. Why?
+I enjoy making my own tools, and always hearing about how you need to use battle-tested software makes me sad. So what it will crash? Bugs can be fixed :^)
 
 # Specs
 - Only Linux is supported
@@ -15,7 +18,7 @@ I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_m
 - No static file caching (yet)
 
 # Benchmarks
-The focus of the server is robustness, but it's definitely not slow. Here's a quick compatison agains nginx (static endpoint, both single-threaded, 1K connection limit)
+The focus of the server is robustness, but it's definitely not slow. Here's a quick comparison agains nginx (static endpoint, both single-threaded, 1K connection limit)
 ```
 (blogtech)
 $ wrk -c 500 -d 5s http://127.0.0.1:80/hello
@@ -64,7 +67,7 @@ By default the server build is HTTP-only:
 ```
 $ make
 ```
-this will generate the executables `serve` (release build), `serve_cov` (coverage build), and `serve_debug` (debug build).
+this will generate the executables `serve` (release build), `serve_cov` (coverage build), and `serve_debug` (debug build). Release builds listen on port 80, while debug builds on port 8080.
 
 To enable HTTPS, you'll need to clone BearSSL and build it. You can do so by running these commands from the root folder of this repository:
 ```
@@ -76,7 +79,7 @@ $ make -j
 $ cd ../../
 $ make -B HTTPS=1
 ```
-The same executables as the HTTP-only will be generated, except they'll also listen on port 443 for secure connections.
+The same executables as the HTTP-only will be generated, except they'll also listen for secure connections on port 443 for release builds and port 8081 for debug builds.
 
 The Certificate `cert.pem` and private key `key.pem` need to be placed in the same directory as the executable. You can change their default name and/or location by modifying the symbols
 ```c
