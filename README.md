@@ -6,7 +6,7 @@ I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_m
 # Specs
 - Only runs on Linux
 - HTTP/1.1 support with pipelining and keep-alive
-* HTTPS (TLS 1.2 using BearSSL)
+- HTTPS (TLS 1.2 using BearSSL)
 - Uses request and connection timeouts
 - Access log, log file rotation, hard disk usage limits
 - No `Transfer-Encoding: Chunked` (when receiving a chunked request the server responds with `411 Length Required`, prompting the client to try again with the `Content-Length` header)
