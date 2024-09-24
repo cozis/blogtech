@@ -1,5 +1,5 @@
 # My Blog Technology
-This is a minimal web server designed to serve my blog. I'm writing it to be robust enough to face the public internet. You can see it in action at http://playin.coz.is/index.html (It's running the dev branch).
+This is a minimal web server designed to serve my blog. I'm writing it to be robust enough to face the public internet. You can see it in action at http://playin.coz.is/index.html.
 
 I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_my_c_web_server_to_host_a_blog_you_cant/) to [hack](https://www.reddit.com/r/hacking/comments/1fcc5hd/im_using_my_custom_c_webserver_to_host_my_blog_no/) me, which resulted in gigabytes and gigabytes of very funny and malicious request logs. I copied a couple into `attempts.txt`. Maybe one day I'll go over the logs to get some new ones :^)
 
@@ -76,10 +76,10 @@ $ make -j
 $ cd ../../
 $ make -B HTTPS=1
 ```
-which will produce the usual executables with HTTPS enabled. The HTTPS server will continue serving HTTP content on port 80.
+The same executables as the HTTP-only will be generated, except they'll also listen on port 443 for secure connections.
 
-The Certificate "cert.pem" and private key "key.pem" need to be placed in the same directory as the executable. You can change their default name and/or location by modifying the symbols
-```
+The Certificate `cert.pem` and private key `key.pem` need to be placed in the same directory as the executable. You can change their default name and/or location by modifying the symbols
+```c
 #define HTTPS_KEY_FILE  "key.pem"
 #define HTTPS_CERT_FILE "cert.pem"
 ```
@@ -91,7 +91,46 @@ then the certificate:
 ```
 openssl req -new -x509 -key key.pem -out cert.pem -days 365
 ```
-when sending requests with curl or similar tools you'll need to allow self-signed certificated.
+
+# Usage
+The server is hardcoded to serve static content in the `docroot/` folder. You can place your files there or you can change this behavior by modifying the `respond` function
+```c
+typedef struct {
+	Method method;
+	string path;
+	int    major;
+	int    minor;
+	int    nheaders;
+	Header headers[MAX_HEADERS];
+	string content;
+} Request;
+
+void respond(Request request, ResponseBuilder *b)
+{
+	if (request.major != 1 || request.minor > 1) {
+		status_line(b, 505); // HTTP Version Not Supported
+		return;
+	}
+
+	if (request.method != M_GET) {
+		status_line(b, 405); // Method Not Allowed
+		return;
+	}
+
+	if (string_match_case_insensitive(request.path, LIT("/hello"))) {
+		status_line(b, 200);
+		append_content_s(b, LIT("Hello, world!"));
+		return;
+	}
+
+	if (serve_file_or_dir(b, LIT("/"), LIT("docroot/"), request.path, NULLSTR, false))
+		return;
+
+	status_line(b, 404);
+	append_content_s(b, LIT("Nothing here :|"));
+}
+```
+you can add your endpoints here by switching on the `request.path` field. Note that the path is just a slice into the request buffer. URIs are not parsed.
 
 # Testing
 I routinely run the server under valgrind or sanitizers (address, undefined) and target it using `wrk`. I'm also adding automatized tests to `tests/test.py` to check compliance with the HTTP/1.1 spec.
