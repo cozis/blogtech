@@ -1,9 +1,12 @@
 *.o
+*.pem
 serve
 serve_*
-serve.gcno
+*.gcno
+*.gcda
 logs/log_*.txt
 *.info
 logs
 report
-blacklist.txt
+3p
+backtrace.txt
