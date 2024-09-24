@@ -1,24 +1,24 @@
 # My Blog Technology
-This is a minimal web server designed to serve my blog. I'm writing it to be robust enough to face the public internet. No need for reverse proxies! You can see it in action at http://playin.coz.is/index.html.
+This is a minimal web server designed to host my blog. It's built from scratch to be robust enough to face the public internet. No reverse proxies required! You can see it in action at http://playin.coz.is/index.html.
 
-I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_my_c_web_server_to_host_a_blog_you_cant/) to [hack](https://www.reddit.com/r/hacking/comments/1fcc5hd/im_using_my_custom_c_webserver_to_host_my_blog_no/) me, which resulted in gigabytes and gigabytes of very funny and malicious request logs. I copied a couple into `attempts.txt`. Maybe one day I'll go over the logs to get some new ones :^)
+I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_my_c_web_server_to_host_a_blog_you_cant/) to [hack](https://www.reddit.com/r/hacking/comments/1fcc5hd/im_using_my_custom_c_webserver_to_host_my_blog_no/) me, which resulted in gigabytes of hilarious and malicious request logs. I saved some in `attempts.txt`, and may dig out a few more for fun someday :^)
 
 # But.. Why?
-I enjoy making my own tools, and always hearing about how you need to use battle-tested software makes me sad. So what it will crash? Bugs can be fixed :^)
+I enjoy making my own tools and I'm a bit tired of hearing that everything needs to be "battle-tested." So what it will crash? Bugs can be fixed :^)
 
 # Specs
-- Only Linux is supported
+- Linux only
 - Implements HTTP/1.1, pipelining, and keep-alive connections
-- HTTPS (up to TLS 1.2 using BearSSL)
+- HTTPS support (up to TLS 1.2 using BearSSL)
 - Minimal dependencies (libc and BearSSL when using HTTPS)
 - Configurable timeouts
-- Access log, crash log, log file rotation, hard disk usage limits
-- No `Transfer-Encoding: Chunked` (when receiving a chunked request the server responds with `411 Length Required`, prompting the client to try again with the `Content-Length` header)
+- Access logs, crash logs, log rotation, disk usage limits
+- No `Transfer-Encoding: Chunked` (responds with `411 Length Required`, prompting the client to resend with `Content-Length`)
 - Single core (This will probably change when I get a better VPS)
 - No static file caching (yet)
 
 # Benchmarks
-The focus of the server is robustness, but it's definitely not slow. Here's a quick comparison agains nginx (static endpoint, both single-threaded, 1K connection limit)
+The focus of the project is robustness, but it's definitely not slow. Here's a quick comparison agains nginx (static endpoint, both single-threaded, 1K connection limit)
 ```
 (blogtech)
 $ wrk -c 500 -d 5s http://127.0.0.1:80/hello
@@ -62,12 +62,12 @@ http {
 }
 ```
 
-# Build and run
+# Build & Run
 By default the server build is HTTP-only:
 ```
 $ make
 ```
-this will generate the executables `serve` (release build), `serve_cov` (coverage build), and `serve_debug` (debug build). Release builds listen on port 80, while debug builds on port 8080.
+this generates the executables: `serve` (release build), `serve_cov` (coverage build), and `serve_debug` (debug build). Release builds listen on port 80; debug builds on port 8080.
 
 To enable HTTPS, you'll need to clone BearSSL and build it. You can do so by running these commands from the root folder of this repository:
 ```
@@ -79,24 +79,22 @@ $ make -j
 $ cd ../../
 $ make -B HTTPS=1
 ```
-The same executables as the HTTP-only will be generated, except they'll also listen for secure connections on port 443 for release builds and port 8081 for debug builds.
+The same executables will be generated, but with secure connections on port 443 (release) or 8081 (debug).
 
-The Certificate `cert.pem` and private key `key.pem` need to be placed in the same directory as the executable. You can change their default name and/or location by modifying the symbols
+Place your `cert.pem` and `key.pem` files in the same directory as the executable. You can customiza names and locations by changing:
 ```c
 #define HTTPS_KEY_FILE  "key.pem"
 #define HTTPS_CERT_FILE "cert.pem"
 ```
-If you just want to test the HTTPS server locally, you can use a self-signed certificate. First, generate a private key:
+
+For testing locally with HTTPS, generate a self-signed certificate (and private key):
 ```
 openssl genpkey -algorithm RSA -out key.pem -pkeyopt rsa_keygen_bits:2048
-```
-then the certificate:
-```
 openssl req -new -x509 -key key.pem -out cert.pem -days 365
 ```
 
 # Usage
-The server is hardcoded to serve static content in the `docroot/` folder. You can place your files there or you can change this behavior by modifying the `respond` function
+The server serves static content from the `docroot/` folder. You can change this by modifying the `respond` function:
 ```c
 typedef struct {
 	Method method;
@@ -136,7 +134,7 @@ void respond(Request request, ResponseBuilder *b)
 you can add your endpoints here by switching on the `request.path` field. Note that the path is just a slice into the request buffer. URIs are not parsed.
 
 # Testing
-I routinely run the server under valgrind or sanitizers (address, undefined) and target it using `wrk`. I'm also adding automatized tests to `tests/test.py` to check compliance with the HTTP/1.1 spec.
+I routinely run the server under valgrind and sanitizers (address, undefined) and target it using `wrk`. I'm also adding automatized tests to `tests/test.py` to check compliance with the HTTP/1.1 spec. I also use it to host my website and post it here and there to keep it under stress.Turns out, all of those bots scanning he internet for vulnerable websites make great fuzzers!
 
 # Known Issues
 - Server replies to HTTP/1.0 clients as HTTP/1.1
