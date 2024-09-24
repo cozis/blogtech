@@ -76,6 +76,8 @@
 #define LOG_DIRECTORY_SIZE_LIMIT_MB 100
 #endif
 
+#define KEEPALIVE_MAXREQS 1000
+
 #define LOG_DIRECTORY "logs"
 
 #define HTTPS_KEY_FILE  "key.pem"
@@ -89,7 +91,7 @@
 #define PROFILE       0
 #define ACCESS_LOG    1
 #define SHOW_IO       0
-#define SHOW_REQUESTS 0
+#define SHOW_REQUESTS 1
 #define REQUEST_TIMEOUT_SEC     5
 #define CLOSING_TIMEOUT_SEC     2
 #define CONNECTION_TIMEOUT_SEC 60
@@ -1064,7 +1066,7 @@ bool should_keep_alive(Connection *conn)
 		return false;
 
 	// Don't keep alive if we served a lot of requests to this connection
-	if (conn->served_count > 100)
+	if (conn->served_count > KEEPALIVE_MAXREQS)
 		return false;
 
 	// Don't keep alive if the server is more than 70% full
@@ -1201,11 +1203,11 @@ bool respond_to_available_requests(Connection *conn)
 		// Reset the request timer
 		conn->start_time = now;
 
-		conn->keep_alive = false;
+		conn->keep_alive = true;
 		string keep_alive_header;
 		if (find_header(&request, LIT("Connection"), &keep_alive_header)) {
-			if (string_match_case_insensitive(trim(keep_alive_header), LIT("Keep-Alive")))
-				conn->keep_alive = true;
+			if (string_match_case_insensitive(trim(keep_alive_header), LIT("Close")))
+				conn->keep_alive = false;
 		}
 		// Respond
 		ResponseBuilder builder;
@@ -1542,6 +1544,13 @@ int main(int argc, char **argv)
 	(void) argv;
 
 	init_globals();
+
+	log_format("BACKTRACE=%d\n", BACKTRACE);
+	log_format("EOPALLOC=%d\n", EOPALLOC);
+	log_format("PROFILE=%d\n", PROFILE);
+	log_format("ACCESS_LOG=%d\n", ACCESS_LOG);
+	log_format("SHOW_IO=%d\n", SHOW_IO);
+	log_format("SHOW_REQUESTS=%d\n", SHOW_REQUESTS);
 
 	DEBUG("Globals initialized\n");
 
