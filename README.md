@@ -138,3 +138,6 @@ I routinely run the server under valgrind and sanitizers (address, undefined) an
 
 # Known Issues
 - Server replies to HTTP/1.0 clients as HTTP/1.1
+
+# Contributing
+I usually work on the DEV branch and merge into MAIN once in a while. If you open a pull requests remember to target DEV. It will make things easier!
