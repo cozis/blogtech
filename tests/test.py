@@ -1,6 +1,7 @@
 import time
 import socket
 import subprocess
+import sys
 from typing import Optional
 from dataclasses import dataclass
 
@@ -151,3 +152,6 @@ for i, test in enumerate(tests):
 print("passed: ", passed, "/", total, sep="")
 p.terminate()
 p.wait()
+
+if passed < total:
+  sys.exit(1)
