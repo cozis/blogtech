@@ -8,6 +8,10 @@ This is a minimal web server designed to host my blog. It's built from scratch t
 
 I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_my_c_web_server_to_host_a_blog_you_cant/) to [hack](https://www.reddit.com/r/hacking/comments/1fcc5hd/im_using_my_custom_c_webserver_to_host_my_blog_no/) me, which resulted in gigabytes of hilarious and malicious request logs. I saved some in `attempts.txt`, and may dig out a few more for fun someday :^)
 
+There is also a discussion on [Hacker News](https://news.ycombinator.com/item?id=41642151)
+
+Feel free to help! At this time the main focus is on semantic correctess of HTTP and testing. I try to keep the main branch stable so remember to target the dev branch with PRs. Changes to README are fine to do on main though.
+
 # But.. Why?
 I enjoy making my own tools and I'm a bit tired of hearing that everything needs to be "battle-tested." So what it will crash? Bugs can be fixed :^)
 
