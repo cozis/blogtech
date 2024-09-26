@@ -2020,7 +2020,7 @@ void log_init(void)
 		return;
 	}
 
-	if (mkdir(LOG_DIRECTORY, 0666) && errno != EEXIST) {
+	if (mkdir(LOG_DIRECTORY, 0755) && errno != EEXIST) {
 		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
