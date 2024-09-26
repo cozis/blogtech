@@ -1,0 +1,61 @@
+name: Testing
+
+on:
+  workflow_call:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: make
+      run: |
+        make
+        mkdir bin
+        bash -c 'mv {serve,serve_cov,serve_debug} bin/'
+
+    - name: Temporarily save artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: artifacts
+        path: bin
+        retention-days: 1
+
+  test:
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Retrieve saved artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts
+          path: bin
+
+      - name: Move artifacts to project root
+        run: |
+          chmod +x bin/*
+          mv bin/* .
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run tests
+        run: |
+          cd tests
+          python test.py
