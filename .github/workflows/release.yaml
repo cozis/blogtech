@@ -1,6 +1,7 @@
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
     tags:
       - 'v*'
 
