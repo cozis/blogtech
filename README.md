@@ -147,6 +147,7 @@ I routinely run the server under valgrind and sanitizers (address, undefined) an
 
 # Known Issues
 - Server replies to HTTP/1.0 clients as HTTP/1.1
+- Server rejects HEAD requests
 
 # Contributing
-I usually work on the DEV branch and merge into MAIN once in a while. If you open a pull requests remember to target DEV. It will make things easier!
+I usually work on the [DEV](https://github.com/cozis/blogtech/tree/dev) branch and merge into [MAIN](https://github.com/cozis/blogtech/tree/main) once in a while. If you open a pull requests remember to target [DEV](https://github.com/cozis/blogtech/tree/dev). It will make things easier!
