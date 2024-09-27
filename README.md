@@ -1,4 +1,9 @@
 # My Blog Technology
+
+![Builds](https://github.com/cozis/blogtech/actions/workflows/testing.yaml/badge.svg)
+[![GitHub Release](https://img.shields.io/github/release/cozis/blogtech.svg)](https://github.com/cozis/blogtech/releases/latest)
+[![License](https://img.shields.io/github/license/cozis/blogtech.svg)](https://github.com/cozis/blogtech/blob/main/UNLICENSE)
+
 This is a minimal web server designed to host my blog. It's built from scratch to be robust enough to face the public internet. No reverse proxies required! You can see it in action at http://playin.coz.is/index.html.
 
 I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_my_c_web_server_to_host_a_blog_you_cant/) to [hack](https://www.reddit.com/r/hacking/comments/1fcc5hd/im_using_my_custom_c_webserver_to_host_my_blog_no/) me, which resulted in gigabytes of hilarious and malicious request logs. I saved some in `attempts.txt`, and may dig out a few more for fun someday :^)
@@ -143,3 +148,6 @@ I routinely run the server under valgrind and sanitizers (address, undefined) an
 # Known Issues
 - Server replies to HTTP/1.0 clients as HTTP/1.1
 - Server rejects HEAD requests
+
+# Contributing
+I usually work on the [DEV](https://github.com/cozis/blogtech/tree/dev) branch and merge into [MAIN](https://github.com/cozis/blogtech/tree/main) once in a while. If you open a pull requests remember to target [DEV](https://github.com/cozis/blogtech/tree/dev). It will make things easier!

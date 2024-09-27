@@ -2416,7 +2416,7 @@ bool load_file_contents(string file, string *out)
 		copied += n;
 	}
 	if (copied != size) {
-		log_format("Read %d bytes from file but %d were expected\n", copied, size);
+		log_format("Read %zu bytes from file but %zu were expected\n", copied, size);
 		return false;
 	}
 
