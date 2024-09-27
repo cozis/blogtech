@@ -306,7 +306,7 @@ def main():
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
                     conn.connect(("127.0.0.1", 8080))
                     online = True
-            except ConnectionRefusedError as exception:
+            except ConnectionRefusedError:
                 pass
 
         total = 0
