@@ -1,29 +1,60 @@
+"""
+Starts the HTTP server and performs scripted interactions to check
+that the HTTP semantics are correct.
+"""
+
 import time
 import socket
 import subprocess
 import sys
-from typing import Optional
 from dataclasses import dataclass
 
 @dataclass
 class Delay:
+    """
+    Represents a delay in a scripted interaction
+    """
     sec: float
 
+@dataclass
 class Send:
+    """
+    Represents output bytes in a scripted interaction
+    """
     def __init__(self, args):
         self.data = bytes("\r\n".join(args), "utf-8")
 
+@dataclass
 class Recv:
+    """
+    Represents input bytes in a scripted interaction
+    """
     def __init__(self, args):
         self.data = bytes("\r\n".join(args), "utf-8")
 
+@dataclass
 class Close:
-    pass
+    """
+    Represents the connection termination in a scripted interaction
+    """
+
+class TestFailure(Exception):
+    """
+    Class representing the failure of a test
+    """
 
 def print_bytes(prefix, data):
+    """
+    Print a sequence of bytes over multiple lines adding a prefix
+    before each line
+    """
     print(prefix, f"\\r\\n\n{prefix}".join(data.decode("utf-8").split("\r\n")), sep="")
 
 def run_test(test, addr, port):
+    """
+    Evaluates the scripted interaction "test" making sure the server
+    listening at addr:port behaves as expected
+    """
 
     conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
@@ -32,17 +63,17 @@ def run_test(test, addr, port):
     for step in test:
         match step:
 
-            case Delay(ms):
-                time.sleep(ms/1000)
+            case Delay(amount_ms):
+                time.sleep(amount_ms/1000)
 
             case Send(data=data):
                 sent = 0
                 while sent < len(data):
-                    n = conn.send(data[sent:])
-                    if n == 0:
+                    just_sent = conn.send(data[sent:])
+                    if just_sent == 0:
                         break
-                    print_bytes("< ", data[sent:sent+n])
-                    sent += n
+                    print_bytes("< ", data[sent:sent+just_sent])
+                    sent += just_sent
 
             case Recv(data=data):
                 chunks = []
@@ -56,12 +87,12 @@ def run_test(test, addr, port):
                     count += len(chunk)
                 received = b''.join(chunks)
                 if data != received:
-                    raise RuntimeError(f"Wrong data. Received:\n\t{received}\nExpected:\n\t{data}")
+                    raise TestFailure(f"Wrong data. Received:\n\t{received}\nExpected:\n\t{data}")
 
             case Close():
                 chunk = conn.recv(1)
                 if chunk != b"":
-                    raise RuntimeError("expected close got some data")
+                    raise TestFailure("expected close got some data")
 
             case _:
                 pass
@@ -260,23 +291,32 @@ tests = [
     ],
 ]
 
-p = subprocess.Popen(['../serve_cov'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def main():
+    """
+    Entry point
+    """
 
-time.sleep(0.5)
+    with subprocess.Popen(['../serve_cov'], stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as server_process:
 
-total = 0
-passed = 0
-for i, test in enumerate(tests):
-    try:
-        run_test(test, "127.0.0.1", 8080)
-        print("Test", i, "passed\n")
-        passed += 1
-    except Exception as e:
-        print("Test", i, "failed:", e.with_traceback(None), "\n")
-    total += 1
-print("passed: ", passed, "/", total, sep="")
-p.terminate()
-p.wait()
+        time.sleep(0.5)
 
-if passed < total:
-    sys.exit(1)
+        total = 0
+        passed = 0
+        for i, current_test in enumerate(tests):
+            try:
+                run_test(current_test, "127.0.0.1", 8080)
+                print("Test", i, "passed\n")
+                passed += 1
+            except TestFailure as exception:
+                print("Test", i, "failed:", exception.with_traceback(None), "\n")
+            total += 1
+        print("passed: ", passed, "/", total, sep="")
+        server_process.terminate()
+        server_process.wait()
+
+    if passed < total:
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
