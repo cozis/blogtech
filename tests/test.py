@@ -299,7 +299,15 @@ def main():
     with subprocess.Popen(['../serve_cov'], stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE) as server_process:
 
-        time.sleep(0.5)
+        online = False
+        while not online:
+            time.sleep(0.5)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
+                    conn.connect(("127.0.0.1", 8080))
+                    online = True
+            except ConnectionRefusedError as exception:
+                pass
 
         total = 0
         passed = 0
