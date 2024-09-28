@@ -31,6 +31,10 @@ closing_timeout_sec 1
 # Request receive timeout
 request_timeout_sec 5
 
+access_log    yes
+show_io       no
+show_requests no
+
 # Address and port the HTTP server will listen on.
 # To bind to all available interfaces, leave a blank address blank:
 http_addr "127.0.0.1"

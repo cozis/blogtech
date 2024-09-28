@@ -67,9 +67,6 @@
 
 #define EOPALLOC      0
 #define PROFILE       0
-#define ACCESS_LOG    1
-#define SHOW_IO       0
-#define SHOW_REQUESTS 0
 #define INPUT_BUFFER_LIMIT_MB   1
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -235,6 +232,7 @@ typedef struct {
 void     config_load(string file);
 void     config_free(void);
 uint32_t config_int(string name);
+bool     config_bool(string name);
 string   config_string(string name);
 
 void     log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffer_size);
@@ -329,6 +327,9 @@ uint64_t real_now;
 int insecure_fd;
 int secure_fd;
 
+bool show_io;
+bool show_requests;
+bool access_log;
 int keep_alive_max_requests;
 int connection_timeout_sec;
 int closing_timeout_sec;
@@ -404,6 +405,9 @@ void init_globals(int argc, char **argv)
 	string config_file = argc > 1 ? STR(argv[1]) : LIT("config.txt");
 	config_load(config_file);
 
+	access_log              = config_bool(LIT("access_log"));
+	show_io                 = config_bool(LIT("show_io"));
+	show_requests           = config_bool(LIT("show_requests"));
 	keep_alive_max_requests = config_int(LIT("keep_alive_max_requests"));
 	connection_timeout_sec  = config_int(LIT("connection_timeout_sec"));
 	closing_timeout_sec     = config_int(LIT("closing_timeout_sec"));
@@ -1144,18 +1148,17 @@ bool respond_to_available_requests(Connection *conn)
 
 		size_t head_length = j+4;
 
-#if SHOW_REQUESTS
-		print_bytes(LIT(""), (string) {src.data, head_length});
-		log_data(LIT("\n"));
-#endif
+		if (show_requests) {
+			print_bytes(LIT(""), (string) {src.data, head_length});
+			log_data(LIT("\n"));
+		}
 
 		// Found! We got the request head
 
 		Request request;
 		int res = parse_request_head((string) {src.data, head_length}, &request);
 
-#if ACCESS_LOG
-		TIME("log_access") {
+		if (access_log) TIME("log_access") {
 			// Log access
 			time_t real_now_in_secs = real_now / 1000;
 			struct tm timeinfo;
@@ -1184,7 +1187,6 @@ bool respond_to_available_requests(Connection *conn)
 				log_format("%s - %s - Bad request\n", timebuf, ipstr);
 			}
 		}
-#endif
 
 		if (res != P_OK) {
 			// Invalid HTTP request
@@ -1501,9 +1503,10 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			string dst = byte_queue_start_write(&conn->input);
 			assert(dst.size >= len);
 			memcpy(dst.data, buf, len);
-#if SHOW_IO
-			print_bytes(LIT("> "), (string) {dst.data, len});
-#endif
+
+			if (show_io)
+				print_bytes(LIT("> "), (string) {dst.data, len});
+
 			byte_queue_end_write(&conn->input, len);
 			br_ssl_engine_recvapp_ack(cc, len);
 			if (respond_to_available_requests(conn))
@@ -1545,9 +1548,10 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			string src = byte_queue_start_read(&conn->output);
 			size_t copy = MIN(len, src.size);
 			memcpy(buf, src.data, copy);
-#if SHOW_IO
-			print_bytes(LIT("< "), (string) {src.data, copy});
-#endif
+
+			if (show_io)
+				print_bytes(LIT("< "), (string) {src.data, copy});
+
 			byte_queue_end_read(&conn->output, copy);
 			br_ssl_engine_sendapp_ack(cc, copy);
 			br_ssl_engine_flush(cc, 0); // TODO: Is this the right time to call it?
@@ -2680,9 +2684,10 @@ bool read_from_socket(int fd, ByteQueue *queue)
 			remove = true;
 			break;
 		}
-#if SHOW_IO
-		print_bytes(LIT("> "), (string) {dst.data, num});
-#endif
+
+		if (show_io)
+			print_bytes(LIT("> "), (string) {dst.data, num});
+
 		byte_queue_end_write(queue, (size_t) num);
 
 		// Input buffer can't go over 20Mb
@@ -2714,9 +2719,9 @@ bool write_to_socket(int fd, ByteQueue *queue)
 			break;
 		}
 
-#if SHOW_IO
-		print_bytes(LIT("< "), (string) {src.data, num});
-#endif
+		if (show_io)
+			print_bytes(LIT("< "), (string) {src.data, num});
+
 		byte_queue_end_read(queue, (size_t) num);
 	}
 
@@ -2951,6 +2956,7 @@ void myfree(void *ptr, size_t num)
 typedef enum {
 	CE_INT,
 	CE_STR,
+	CE_BOOL,
 } ConfigEntryType;
 
 typedef struct {
@@ -2959,6 +2965,7 @@ typedef struct {
 	union {
 		uint32_t num;
 		string   txt;
+		bool     yes;
 	};
 } ConfigEntry;
 
@@ -3041,7 +3048,20 @@ bool config_parse(string content)
 				break;
 			}
 
-			if (src[cur] == '"') {
+			if (cur+2 < len
+				&& src[cur+0] == 'y'
+				&& src[cur+1] == 'e'
+				&& src[cur+2] == 's') {
+				entry.type = CE_BOOL;
+				entry.yes = true;
+				cur += 3;
+			} else if (cur+1 < len
+				&& src[cur+0] == 'n'
+				&& src[cur+1] == 'o') {
+				entry.type = CE_BOOL;
+				entry.yes = false;
+				cur += 2;
+			} else if (src[cur] == '"') {
 				cur++; // Skip the first double quote
 				size_t value_start = cur;
 				while (cur < len && src[cur] != '"')
@@ -3178,6 +3198,21 @@ uint32_t config_int(string name)
 	}
 
 	return entry->num;
+}
+
+bool config_bool(string name)
+{
+	ConfigEntry *entry = config_any(name);
+	if (entry == NULL) {
+		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
+		exit(-1);
+	}
+	if (entry->type != CE_BOOL) {
+		log_format("Config entry '%.*s' is not a boolean\n", (int) name.size, name.data);
+		exit(-1);
+	}
+
+	return entry->yes;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
