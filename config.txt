@@ -6,7 +6,7 @@ log_buff_size_b 1048576 # 1MB
 log_file_limit_b 16777216 # 16MB
 
 # Log folder limit in megabytes
-log_dir_limit_mb 25600 # 26GB
+log_dir_limit_mb 25600 # 25GB
 
 # Log folder
 log_dir_path logs

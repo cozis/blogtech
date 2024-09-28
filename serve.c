@@ -484,21 +484,23 @@ void init_globals(int argc, char **argv)
 	{
 		secure_fd = -1;
 #if HTTPS
-		// Create SSL listener
 		string   https_addr = config_string(LIT("https_addr"));
 		uint32_t https_port = config_int(LIT("https_port"));
+		string   https_cert_file = config_string(LIT("cert_file"));
+		string   https_key_file  = config_string(LIT("privkey_file"));
+
 		secure_fd = create_listening_socket(https_addr, https_port);
 		if (secure_fd < 0)
 			log_fatal(LIT("Couldn't bind\n"));
 		log_format("Listening on %.*s:%d\n", (int) https_addr.size, https_addr.data, https_port);
 
 		// Load certificate
-		if (!load_certs_from_file(config_string(LIT("cert_file")), &certs))
+		if (!load_certs_from_file(https_cert_file, &certs))
 			log_fatal(LIT("Couldn't load certificates\n"));
 		DEBUG("Certificates loaded\n");
 
 		// Load private key
-		if (!load_private_key_from_file(config_string(LIT("privkey_file")), &pkey))
+		if (!load_private_key_from_file(https_key_file, &pkey))
 			log_fatal(LIT("Couldn't load private key\n"));
 		DEBUG("Private key loaded\n");
 
