@@ -102,7 +102,7 @@ typedef struct {
 	size_t size;
 } string;
 
-#define LIT(S) ((string) {.data=(S), .size=(S) ? sizeof(S)-1 : 0})
+#define LIT(S) ((string) {.data=(S), .size=sizeof(S)-1})
 #define STR(S) ((string) {.data=(S), .size=strlen(S)})
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
@@ -2809,7 +2809,7 @@ bool write_format_to_stderr_va(const char *fmt, va_list args)
 {
 	char buf[1<<10];
 
-	int num = snprintf(buf, sizeof(buf), fmt, args);
+	int num = vsnprintf(buf, sizeof(buf), fmt, args);
 	if (num < 0) log_fatal(LIT("Invalid format"));
 
 	string str = {buf, num};
@@ -2979,7 +2979,7 @@ void make_char_printable(char *buf, size_t max, char c)
 		buf[3] = '\0';
 	} else {
 		assert(max >= 5);
-		char hextable[] = "0123456789abcdef";
+		static const char hextable[] = "0123456789abcdef";
 		buf[0] = '0';
 		buf[1] = 'x';
 		buf[2] = hextable[c >> 4];
@@ -3026,11 +3026,11 @@ bool config_parse(string content)
 
 			ConfigEntry entry;
 
-			size_t start = cur;
+			size_t name_start = cur;
 			do
 				cur++;
 			while (cur < len && (is_alpha(src[cur]) || is_digit(src[cur]) || src[cur] == '_'));
-			entry.name = substr(content, start, cur);
+			entry.name = substr(content, name_start, cur);
 
 			while (cur < len && is_space(src[cur]) && src[cur] != '\n')
 				cur++;
@@ -3043,11 +3043,11 @@ bool config_parse(string content)
 
 			if (src[cur] == '"') {
 				cur++; // Skip the first double quote
-				size_t start = cur;
+				size_t value_start = cur;
 				while (cur < len && src[cur] != '"')
 					cur++;
 				entry.type = CE_STR;
-				entry.txt = substr(content, start, cur);
+				entry.txt = substr(content, value_start, cur);
 				if (cur < len) {
 					assert(src[cur] == '"');
 					cur++;
@@ -3067,11 +3067,11 @@ bool config_parse(string content)
 				entry.type = CE_INT;
 				entry.num = value;
 			} else {
-				size_t start = cur;
+				size_t value_start = cur;
 				while (cur < len && (is_print(src[cur]) && !is_space(src[cur])))
 					cur++;
 				entry.type = CE_STR;
-				entry.txt = substr(content, start, cur);
+				entry.txt = substr(content, value_start, cur);
 			}
 
 			if (config_count == config_capacity) {
