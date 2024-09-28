@@ -117,7 +117,7 @@ typedef struct {
 #define NULLSTR ((string) {.data=NULL, .size=0})
 
 #ifndef NDEBUG
-#define DEBUG(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
+#define DEBUG(fmt, ...) write_format_to_stderr(fmt, ## __VA_ARGS__)
 #else
 #define DEBUG(...) {}
 #endif
@@ -301,6 +301,9 @@ uint64_t get_monotonic_time_ns(void);
 
 bool   load_file_contents(string file, string *out);
 bool   set_blocking(int fd, bool blocking);
+bool   write_string_to_stderr(string s);
+bool   write_format_to_stderr(const char *fmt, ...);
+bool   write_format_to_stderr_va(const char *fmt, va_list args);
 bool   read_from_socket(int fd, ByteQueue *queue);
 bool   write_to_socket(int fd, ByteQueue *queue);
 int    create_listening_socket(string addr, int port);
@@ -2007,7 +2010,7 @@ void log_choose_file_name(char *dst, size_t max, bool startup)
 
 		int num = snprintf(dst, max, "%s/log_%d.txt", log_dir, log_last_file_index);
 		if (num < 0 || (size_t) num >= max) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2017,14 +2020,14 @@ void log_choose_file_name(char *dst, size_t max, bool startup)
 		if (stat(dst, &buf)) {
 			if (errno == ENOENT)
 				break;
-			fprintf(stderr, "log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
+			write_format_to_stderr("log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
 		prev_size = (size_t) buf.st_size;
 
 		if (log_last_file_index == 100000000) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2038,7 +2041,7 @@ void log_choose_file_name(char *dst, size_t max, bool startup)
 
 		int num = snprintf(dst, max, "%s/log_%d.txt", log_dir, log_last_file_index);
 		if (num < 0 || (size_t) num >= max) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2059,13 +2062,13 @@ void log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffe
 
 	log_buffer = mymalloc(log_buffer_size);
 	if (log_buffer == NULL) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
 
 	if (mkdir(log_dir, 0755) && errno != EEXIST) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -2076,7 +2079,7 @@ void log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffe
 
 	log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 	if (log_fd < 0) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -2085,7 +2088,7 @@ void log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffe
 
 	DIR *d = opendir(log_dir);
 	if (d == NULL) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -2112,7 +2115,7 @@ void log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffe
 
 	static_assert(SIZEOF(size_t) > 4, "It's assumed size_t can store a number of bytes in the order of 10gb");
 	if (log_total_size > log_dir_limit_mb * 1024 * 1024) {
-		fprintf(stderr, "Log reached disk limit at startup\n");
+		write_string_to_stderr(LIT("Log reached disk limit at startup\n"));
 		log_failed = true;
 		return;
 	}
@@ -2136,8 +2139,6 @@ void log_free(void)
 		log_dir_limit_mb = 0;
 		log_dir[0] = '\0';
 		log_initialized = false;
-	} else {
-		fflush(stderr);
 	}
 }
 
@@ -2156,7 +2157,7 @@ void log_flush(void)
 	 */
 	struct stat buf;
 	if (fstat(log_fd, &buf)) {
-		fprintf(stderr, "log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
+		write_format_to_stderr("log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -2170,7 +2171,7 @@ void log_flush(void)
 		close(log_fd);
 		log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 		if (log_fd < 0) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2187,7 +2188,7 @@ void log_flush(void)
 		if (num < 0) {
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2195,7 +2196,7 @@ void log_flush(void)
 		if (num == 0) {
 			zeros++;
 			if (zeros == 1000) {
-				fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+				write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 				log_failed = true;
 				return;
 			}
@@ -2207,7 +2208,7 @@ void log_flush(void)
 		log_total_size += num;
 
 		if (log_total_size > log_dir_limit_mb * 1024 * 1024) {
-			fprintf(stderr, "Log reached disk limit\n");
+			write_string_to_stderr(LIT("Log reached disk limit\n"));
 			log_failed = true;
 			return;
 		}
@@ -2220,8 +2221,6 @@ void log_flush(void)
 void log_fatal(string str)
 {
 	log_data(str);
-	fflush(stdout);
-	fflush(stderr);
 	exit(-1);
 }
 
@@ -2230,7 +2229,7 @@ void log_format(const char *fmt, ...)
 	if (!log_initialized) {
 		va_list args;
 		va_start(args, fmt);
-		vfprintf(stderr, fmt, args);
+		write_format_to_stderr_va(fmt, args);
 		va_end(args);
 		return;
 	}
@@ -2252,7 +2251,7 @@ void log_format(const char *fmt, ...)
 	}
 
 	if (num < 0 || (size_t) num > log_buffer_size) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -2300,7 +2299,7 @@ void log_data(string str)
 void log_perror(string str)
 {
 	if (!log_initialized)
-		printf("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
+		write_format_to_stderr("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
 	else
 		log_format("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
 }
@@ -2783,6 +2782,42 @@ bool set_blocking(int fd, bool blocking)
 	return true;
 }
 
+bool write_string_to_stderr(string s)
+{
+	int fd = STDERR_FILENO;
+	size_t num = 0;
+	while (num < s.size) {
+		int ret = write(fd, s.data + num, s.size - num);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return false;
+		}
+		num += ret;
+	};
+	return true;
+}
+
+bool write_format_to_stderr_va(const char *fmt, va_list args)
+{
+	char buf[1<<10];
+
+	int num = snprintf(buf, sizeof(buf), fmt, args);
+	if (num < 0) log_fatal(LIT("Invalid format"));
+
+	string str = {buf, num};
+	return write_string_to_stderr(str);
+}
+
+bool write_format_to_stderr(const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	bool ok = write_format_to_stderr_va(fmt, args);
+	va_end(args);
+	return ok;
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// PROFILING                                                                               ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -2823,7 +2858,7 @@ void print_timing_results(void)
 
 	double cy2ns = (double) (end_ns - timing_init_time_ns) / (end_cycles - timing_init_time_cycles);
 
-	printf("Printing timing results\n");
+	write_format_to_stderr("Printing timing results\n");
 	for (int i = 0; i < COUNTOF(timed_scopes); i++) {
 		TimedScope scope = timed_scopes[i];
 		if (scope.exec_count == 0)
@@ -2834,7 +2869,7 @@ void print_timing_results(void)
 		human_readable_time_interval(cy2ns * scope.delta_cycles, total_str, sizeof(total_str));
 		human_readable_time_interval(cy2ns * scope.delta_cycles / scope.exec_count, average_str, sizeof(average_str));
 
-		printf("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
+		write_format_to_stderr("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
 			(int) scope.label.size, scope.label.data,
 			total_str, average_str, scope.exec_count);
 	}
@@ -2869,8 +2904,6 @@ void *mymalloc(size_t num)
 
 	if (mprotect(head_page, page_size, PROT_NONE)) {
 		log_perror(LIT("mprotect"));
-		fflush(stdout);
-		fflush(stderr);
 		exit(-1);
 	}
 
@@ -2979,7 +3012,7 @@ bool config_parse(string content)
 				char buf[5];
 				make_char_printable(buf, sizeof(buf), src[cur]);
 				// Configs are handled before logging, so we need to write to stderr here
-				fprintf(stderr, "Could not parse config file (invalid character %s)\n", buf);
+				log_format("Could not parse config file (invalid character %s)\n", buf);
 				error = true;
 				break;
 			}
@@ -2996,7 +3029,7 @@ bool config_parse(string content)
 				cur++;
 
 			if (cur == len) {
-				fprintf(stderr, "Missing value after '%.*s' in config file\n", (int) entry.name.size, entry.name.data);
+				log_format("Missing value after '%.*s' in config file\n", (int) entry.name.size, entry.name.data);
 				error = true;
 				break;
 			}
@@ -3017,7 +3050,7 @@ bool config_parse(string content)
 				do {
 					int d = src[cur] - '0';
 					if (value > (UINT32_MAX - d) / 10) {
-						fprintf(stderr, "Invalid value after '%.*s' in config file (Integer is too big)\n", (int) entry.name.size, entry.name.data);
+						log_format("Invalid value after '%.*s' in config file (Integer is too big)\n", (int) entry.name.size, entry.name.data);
 						error = true;
 						break;
 					}
@@ -3038,7 +3071,7 @@ bool config_parse(string content)
 				int   new_cap = MAX(2 * config_capacity, 32);
 				void *new_ptr = mymalloc(new_cap * sizeof(ConfigEntry));
 				if (new_ptr == NULL) {
-					fprintf(stderr, "Couldn't load config file (out of memory)\n");
+					log_format("Couldn't load config file (out of memory)\n");
 					error = true;
 					break;
 				}
@@ -3062,7 +3095,7 @@ bool config_parse(string content)
 				if (src[cur] != '\n') {
 					char buf[5];
 					make_char_printable(buf, sizeof(buf), src[cur]);
-					fprintf(stderr, "Invalid character %s after '%.*s' entry in config file\n", buf, (int) entry.name.size, entry.name.data);
+					log_format("Invalid character %s after '%.*s' entry in config file\n", buf, (int) entry.name.size, entry.name.data);
 					error = true;
 					break;
 				}
@@ -3089,8 +3122,6 @@ void config_load(string file)
 	if (!config_parse(config_content)) {
 		myfree(config_content.data, config_content.size);
 		config_content = NULLSTR;
-		fflush(stdout);
-		fflush(stderr);
 		exit(-1);
 	}
 }
@@ -3118,14 +3149,10 @@ string config_string(string name)
 	ConfigEntry *entry = config_any(name);
 	if (entry == NULL) {
 		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
-		fflush(stdout);
-		fflush(stderr);
 		exit(-1);
 	}
 	if (entry->type != CE_STR) {
 		log_format("Config entry '%.*s' is not a string\n", (int) name.size, name.data);
-		fflush(stdout);
-		fflush(stderr);
 		exit(-1);
 	}
 	return entry->txt;
@@ -3136,14 +3163,10 @@ uint32_t config_int(string name)
 	ConfigEntry *entry = config_any(name);
 	if (entry == NULL) {
 		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
-		fflush(stdout);
-		fflush(stderr);
 		exit(-1);
 	}
 	if (entry->type != CE_INT) {
 		log_format("Config entry '%.*s' is not a string\n", (int) name.size, name.data);
-		fflush(stdout);
-		fflush(stderr);
 		exit(-1);
 	}
 
