@@ -1,0 +1,31 @@
+
+# Log buffer size in bytes
+log_buff_size_b 1048576 # 1MB
+
+# Log file size limit in bytes
+log_file_limit_b 16777216 # 16MB
+
+# Log folder limit in megabytes
+log_dir_limit_mb 25600 # 26GB
+
+# Log folder
+log_dir_path logs
+
+# Capacity of the server. This must be lower than the NOFILE rlimit by 2
+# If the rlimit is 1024, max_connections can only go up to 1024-2=1022
+max_connections 1022
+
+# Address and port the HTTP server will listen on.
+# To bind to all available interfaces, leave a blank address blank:
+http_addr "127.0.0.1"
+http_port 8080
+
+# Address and port the HTTPS server will listen on (if the server
+# has been built with HTTPS support). To bind to all interfaces you
+# must leave the address blank.
+https_addr "127.0.0.1"
+https_port 8081
+
+# Certificate and private key files
+cert_file    "cert.pem"
+privkey_file "key.pem"
