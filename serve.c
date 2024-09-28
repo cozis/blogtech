@@ -1981,10 +1981,11 @@ void log_choose_file_name(char *dst, size_t max, bool startup)
 		if (stat(dst, &buf)) {
 			if (errno == ENOENT)
 				break;
-			prev_size = -1;
-		} else {
-			prev_size = (size_t) buf.st_size;
+			fprintf(stderr, "log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
+			log_failed = true;
+			return;
 		}
+		prev_size = (size_t) buf.st_size;
 
 		if (log_last_file_index == 100000000) {
 			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
@@ -2020,7 +2021,7 @@ void log_init(void)
 		return;
 	}
 
-	if (mkdir(LOG_DIRECTORY, 0666) && errno != EEXIST) {
+	if (mkdir(LOG_DIRECTORY, 0755) && errno != EEXIST) {
 		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
