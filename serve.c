@@ -61,14 +61,18 @@
 #endif
 
 #ifdef RELEASE
+#define ADDR NULL
 #define PORT 80
+#define HTTPS_ADDR NULL
 #define HTTPS_PORT 443
 #define MAX_CONNECTIONS (1024-2)
 #define LOG_BUFFER_SIZE (1<<20)
 #define LOG_FILE_LIMIT  (1<<24)
 #define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
 #else
+#define ADDR "127.0.0.1"
 #define PORT 8080
+#define HTTPS_ADDR "127.0.0.1"
 #define HTTPS_PORT 8081
 #define MAX_CONNECTIONS 32
 #define LOG_BUFFER_SIZE (1<<10)
@@ -131,7 +135,7 @@ typedef struct {
 	size_t size;
 } string;
 
-#define LIT(S) ((string) {.data=(S), .size=sizeof(S)-1})
+#define LIT(S) ((string) {.data=(S), .size=(S) ? sizeof(S)-1 : 0})
 #define STR(S) ((string) {.data=(S), .size=strlen(S)})
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
@@ -320,7 +324,7 @@ bool   load_file_contents(string file, string *out);
 bool   set_blocking(int fd, bool blocking);
 bool   read_from_socket(int fd, ByteQueue *queue);
 bool   write_to_socket(int fd, ByteQueue *queue);
-int    create_listening_socket(int port);
+int    create_listening_socket(string addr, int port);
 
 void   status_line(ResponseBuilder *b, int status);
 void   add_header(ResponseBuilder *b, string header);
@@ -451,16 +455,16 @@ void init_globals(void)
 		byte_queue_init(&conns[i].output);
 	}
 
-	insecure_fd = create_listening_socket(PORT);
+	insecure_fd = create_listening_socket(LIT(ADDR), PORT);
 	if (insecure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
-	log_format("Listening on port %d\n", PORT);
+	log_format("Listening on %s:%d\n", ADDR, PORT);
 
 	DEBUG("HTTP started\n");
 
 #if HTTPS
-	secure_fd = create_listening_socket(HTTPS_PORT);
+	secure_fd = create_listening_socket(LIT(HTTPS_ADDR), HTTPS_PORT);
 	if (secure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
-	log_format("Listening on port %d\n", HTTPS_PORT);
+	log_format("Listening on %s:%d\n", HTTPS_ADDR, HTTPS_PORT);
 
 	if (!load_certs_from_file(LIT(HTTPS_CERT_FILE), &certs))
 		log_fatal(LIT("Couldn't load certificates\n"));
@@ -2642,7 +2646,7 @@ bool write_to_socket(int fd, ByteQueue *queue)
 	return remove;
 }
 
-int create_listening_socket(int port)
+int create_listening_socket(string addr, int port)
 {
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
@@ -2658,11 +2662,26 @@ int create_listening_socket(int port)
 	int one = 1;
 	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
 
-	struct sockaddr_in addr;
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
+	struct in_addr addr2;
+	if (addr.size == 0)
+		addr2.s_addr = htonl(INADDR_ANY);
+	else {
+		assert(addr.data);
+		char addr_copy[INET_ADDRSTRLEN];
+		if (addr.size >= SIZEOF(addr_copy))
+			log_fatal(LIT("Invalid IP address (too long)\n"));
+		memcpy(addr_copy, addr.data, addr.size);
+		addr_copy[addr.size] = '\0';
+		int res = inet_pton(AF_INET, addr_copy, &addr2);
+		if (res == 0) log_fatal(LIT("Invalid IP address (too long)\n"));
+		if (res != 1) log_fatal(LIT("Could not parse IP address (internal error)\n"));
+	}
+
+	struct sockaddr_in addr3;
+	addr3.sin_family = AF_INET;
+	addr3.sin_port = htons(port);
+	addr3.sin_addr = addr2;
+	if (bind(listen_fd, (struct sockaddr*) &addr3, sizeof(addr3))) {
 		log_perror(LIT("bind"));
 		return -1;
 	}
