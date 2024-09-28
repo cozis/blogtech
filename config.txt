@@ -32,6 +32,8 @@ closing_timeout_sec 1
 request_timeout_sec 5
 
 access_log    yes
+
+# These are debug options
 show_io       no
 show_requests no
 

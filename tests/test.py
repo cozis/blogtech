@@ -7,7 +7,14 @@ import time
 import socket
 import subprocess
 import sys
+from datetime import datetime
 from dataclasses import dataclass
+
+HTTP_PORT = 8080
+HTTPS_PORT = 8081
+CONNECTION_TIMEOUT_SEC = 60
+CLOSING_TIMEOUT_SEC = 1
+REQUEST_TIMEOUT_SEC = 5
 
 @dataclass
 class Delay:
@@ -296,24 +303,60 @@ def main():
     Entry point
     """
 
-    with subprocess.Popen(['../serve_cov'], stdout=subprocess.PIPE,
+    config_file = "test_config.txt"
+    with open(config_file, "w", encoding="utf-8") as file:
+        file.write(f"""
+        log_buff_size_b 1048576 # 1MB
+        log_file_limit_b 16777216 # 16MB
+        log_dir_limit_mb 25600 # 25GB
+        log_dir_path logs
+        log_flush_timeout_sec 3
+        max_connections 1022
+        keep_alive_max_requests 1000
+        connection_timeout_sec {CONNECTION_TIMEOUT_SEC}
+        closing_timeout_sec {CLOSING_TIMEOUT_SEC}
+        request_timeout_sec {REQUEST_TIMEOUT_SEC}
+        access_log no
+        show_io no
+        show_requests no
+        http_addr "127.0.0.1"
+        http_port {HTTP_PORT}
+        https_addr "127.0.0.1"
+        https_port {HTTPS_PORT}
+        cert_file "cert.pem"
+        privkey_file "key.pem"
+        """)
+
+    total = 0
+    passed = 0
+
+    with subprocess.Popen(['../serve', config_file], stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE) as server_process:
+        timeout_sec = 10
 
         online = False
+        start_time = datetime.now()
         while not online:
+
+            elapsed_sec = (datetime.now() - start_time).total_seconds()
+            if elapsed_sec >= timeout_sec:
+                print("Couldn't connect to server")
+                server_process.terminate()
+                return 1
+
             time.sleep(0.5)
+
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
-                    conn.connect(("127.0.0.1", 8080))
+                    conn.connect(("127.0.0.1", HTTP_PORT))
                     online = True
             except ConnectionRefusedError:
                 pass
+        print("Connected")
 
-        total = 0
-        passed = 0
         for i, current_test in enumerate(tests):
             try:
-                run_test(current_test, "127.0.0.1", 8080)
+                run_test(current_test, "127.0.0.1", HTTP_PORT)
                 print("Test", i, "passed\n")
                 passed += 1
             except TestFailure as exception:
@@ -324,7 +367,8 @@ def main():
         server_process.wait()
 
     if passed < total:
-        sys.exit(1)
+        return 1
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
