@@ -61,8 +61,6 @@
 #define HTTPS 0
 #endif
 
-#define KEEPALIVE_MAXREQS 1000
-
 #define BACKTRACE        1
 #define BACKTRACE_FILE   "backtrace.txt"
 #define BACKTRACE_LIMIT 30
@@ -72,10 +70,6 @@
 #define ACCESS_LOG    1
 #define SHOW_IO       0
 #define SHOW_REQUESTS 0
-#define REQUEST_TIMEOUT_SEC     5
-#define CLOSING_TIMEOUT_SEC     2
-#define CONNECTION_TIMEOUT_SEC 60
-#define LOG_FLUSH_TIMEOUT_SEC   3
 #define INPUT_BUFFER_LIMIT_MB   1
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -123,7 +117,7 @@ typedef struct {
 #endif
 
 #if PROFILE
-#define TIME(label) for (uint64_t start__ = __rdtsc(), done__ = 0; !done__; timed_scope_result(__COUNTER__, __rdtsc() - start__, LIT(label)), (done__=1))
+#define TIME(label) for (uint64_t start__ = __rdtsc(), done__ = 0; !done__; timing_result(__COUNTER__, __rdtsc() - start__, LIT(label)), (done__=1))
 #else
 #define TIME(...)
 #endif
@@ -265,8 +259,8 @@ void     byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
 
 #if PROFILE
 void     timing_init(void);
-void     print_timing_results(void);
-void     timed_scope_result(int scope_index, uint64_t delta_cycles, string label);
+void     timing_result(int scope_index, uint64_t delta_cycles, string label);
+void     timing_print_results(void);
 #endif
 
 #if HTTPS
@@ -334,6 +328,12 @@ uint64_t real_now;
 
 int insecure_fd;
 int secure_fd;
+
+int keep_alive_max_requests;
+int connection_timeout_sec;
+int closing_timeout_sec;
+int request_timeout_sec;
+int log_flush_timeout_sec;
 
 #if HTTPS
 PrivateKey pkey;
@@ -403,6 +403,12 @@ void init_globals(int argc, char **argv)
 
 	string config_file = argc > 1 ? STR(argv[1]) : LIT("config.txt");
 	config_load(config_file);
+
+	keep_alive_max_requests = config_int(LIT("keep_alive_max_requests"));
+	connection_timeout_sec  = config_int(LIT("connection_timeout_sec"));
+	closing_timeout_sec     = config_int(LIT("closing_timeout_sec"));
+	request_timeout_sec     = config_int(LIT("request_timeout_sec"));
+	log_flush_timeout_sec   = config_int(LIT("log_flush_timeout_sec"));
 
 	// Setup signal handlers
 	{
@@ -517,7 +523,7 @@ void init_globals(int argc, char **argv)
 void free_globals(void)
 {
 #if PROFILE
-	print_timing_results();
+	timing_print_results();
 #endif
 
 #if HTTPS
@@ -536,6 +542,7 @@ void free_globals(void)
 		}
 	}
 	myfree(conns, max_conns * sizeof(Connection));
+	myfree(pollarray, (max_conns+2) * sizeof(struct pollfd));
 
 	log_data(LIT("closing\n"));
 	log_free();
@@ -1100,11 +1107,11 @@ bool should_keep_alive(Connection *conn)
 		return false;
 
 	// Don't keep alive if the request is too old
-	if (now - conn->creation_time > CONNECTION_TIMEOUT_SEC * 1000)
+	if (now - conn->creation_time > (uint64_t) connection_timeout_sec * 1000)
 		return false;
 
 	// Don't keep alive if we served a lot of requests to this connection
-	if (conn->served_count > KEEPALIVE_MAXREQS)
+	if (conn->served_count > keep_alive_max_requests)
 		return false;
 
 	// Don't keep alive if the server is more than 70% full
@@ -1116,7 +1123,7 @@ bool should_keep_alive(Connection *conn)
 
 uint64_t deadline_of(Connection *conn)
 {
-	return conn->start_time + (conn->closing ? CLOSING_TIMEOUT_SEC : REQUEST_TIMEOUT_SEC) * 1000;
+	return conn->start_time + (conn->closing ? closing_timeout_sec : request_timeout_sec) * 1000;
 }
 
 bool respond_to_available_requests(Connection *conn)
@@ -1589,7 +1596,7 @@ int main(int argc, char **argv)
 		build_poll_array(pollarray, &timeout);
 
 		if (!log_empty()) {
-			int log_timeout = (last_log_time + LOG_FLUSH_TIMEOUT_SEC * 1000) - now;
+			int log_timeout = (last_log_time + log_flush_timeout_sec * 1000) - now;
 			if (timeout < 0)
 				timeout = log_timeout;
 			else
@@ -1659,7 +1666,7 @@ int main(int argc, char **argv)
 			}
 		}
 
-		if (now - last_log_time > LOG_FLUSH_TIMEOUT_SEC * 1000) {
+		if (now - last_log_time > (uint64_t) log_flush_timeout_sec * 1000) {
 			log_flush();
 			last_log_time = now;
 		}
@@ -2851,7 +2858,7 @@ void human_readable_time_interval(uint64_t ns, char *dst, size_t max)
         snprintf(dst, max, "%.1Lf ns", (long double) ns);
 }
 
-void print_timing_results(void)
+void timing_print_results(void)
 {
 	uint64_t end_cycles = __rdtsc();
 	uint64_t end_ns = get_monotonic_time_ns();
@@ -2875,7 +2882,7 @@ void print_timing_results(void)
 	}
 }
 
-void timed_scope_result(int scope_index, uint64_t delta_cycles, string label)
+void timing_result(int scope_index, uint64_t delta_cycles, string label)
 {
 	timed_scopes[scope_index].label = label;
 	timed_scopes[scope_index].delta_cycles += delta_cycles;

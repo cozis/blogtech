@@ -11,9 +11,25 @@ log_dir_limit_mb 25600 # 25GB
 # Log folder
 log_dir_path logs
 
-# Capacity of the server. This must be lower than the NOFILE rlimit by 2
+# How often the log buffer is flushed
+log_flush_timeout_sec 3
+
+# Capacity of the server. This must be lower than the NOFILE rlimit by 2.
 # If the rlimit is 1024, max_connections can only go up to 1024-2=1022
 max_connections 1022
+
+# Maximum HTTP request count that can be server through a single TCP connection
+keep_alive_max_requests 1000
+
+# Maximum time a TCP connection is allowed to be alive
+connection_timeout_sec 60
+
+# Timeout for the closing state (when response is being flushed before the TCP
+# connection is closed)
+closing_timeout_sec 1
+
+# Request receive timeout
+request_timeout_sec 5
 
 # Address and port the HTTP server will listen on.
 # To bind to all available interfaces, leave a blank address blank:
