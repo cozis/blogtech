@@ -229,8 +229,9 @@ typedef struct {
 /// FORWARD DECLARATIONS                                                                    ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-void     config_load(string file);
+void     config_init(void);
 void     config_free(void);
+bool     config_load(string file);
 uint32_t config_int(string name);
 bool     config_bool(string name);
 string   config_string(string name);
@@ -403,7 +404,8 @@ void init_globals(int argc, char **argv)
 	atexit(log_free);
 
 	string config_file = argc > 1 ? STR(argv[1]) : LIT("config.txt");
-	config_load(config_file);
+	if (!config_load(config_file))
+		exit(-1);
 
 	access_log              = config_bool(LIT("access_log"));
 	show_io                 = config_bool(LIT("show_io"));
@@ -1587,6 +1589,7 @@ bool update_connection(Connection *conn, struct pollfd *polldata)
 	return ok;
 }
 
+#ifndef NOMAIN
 int main(int argc, char **argv)
 {
 	init_globals(argc, argv);
@@ -1680,6 +1683,7 @@ int main(int argc, char **argv)
 	free_globals();
 	return 0;
 }
+#endif
 
 #define PATH_SEP '/'
 
@@ -2989,7 +2993,7 @@ void make_char_printable(char *buf, size_t max, char c)
 		static const char hextable[] = "0123456789abcdef";
 		buf[0] = '0';
 		buf[1] = 'x';
-		buf[2] = hextable[c >> 4];
+		buf[2] = hextable[(uint8_t) c >> 4];
 		buf[3] = hextable[c & 0xf];
 		buf[4] = '\0';
 	}
@@ -3051,13 +3055,15 @@ bool config_parse(string content)
 			if (cur+2 < len
 				&& src[cur+0] == 'y'
 				&& src[cur+1] == 'e'
-				&& src[cur+2] == 's') {
+				&& src[cur+2] == 's'
+				&& (cur+3 == len || is_space(src[cur+3]))) {
 				entry.type = CE_BOOL;
 				entry.yes = true;
 				cur += 3;
 			} else if (cur+1 < len
 				&& src[cur+0] == 'n'
-				&& src[cur+1] == 'o') {
+				&& src[cur+1] == 'o'
+				&& (cur+2 == len || is_space(src[cur+2]))) {
 				entry.type = CE_BOOL;
 				entry.yes = false;
 				cur += 2;
@@ -3084,6 +3090,7 @@ bool config_parse(string content)
 					value = value * 10 + d;
 					cur++;
 				} while (cur < len && is_digit(src[cur]));
+				if (error) break;
 				entry.type = CE_INT;
 				entry.num = value;
 			} else {
@@ -3131,36 +3138,42 @@ bool config_parse(string content)
 		}
 	}
 
-	if (error)
-		myfree(config_entries, config_capacity * sizeof(ConfigEntry));
+	if (error) config_free();
 	return !error;
 }
 
-void config_load(string file)
+void config_init(void)
 {
 	config_content  = NULLSTR;
 	config_entries  = NULL;
 	config_count    = 0;
 	config_capacity = 0;
+}
+
+bool config_load(string file)
+{
+	config_init();
 
 	if (!load_file_contents(file, &config_content))
 		log_fatal(LIT("Could not load config file\n"));
 
 	if (!config_parse(config_content)) {
-		myfree(config_content.data, config_content.size);
-		config_content = NULLSTR;
-		exit(-1);
+		return false;
 	}
+
+	return true;
 }
 
 void config_free(void)
 {
-	myfree(config_content.data, config_content.size);
-	myfree(config_entries, config_capacity * sizeof(ConfigEntry));
-	config_content  = NULLSTR;
-	config_entries  = NULL;
-	config_count    = 0;
-	config_capacity = 0;
+	if (config_entries) {
+		myfree(config_content.data, config_content.size);
+		myfree(config_entries, config_capacity * sizeof(ConfigEntry));
+		config_content  = NULLSTR;
+		config_entries  = NULL;
+		config_count    = 0;
+		config_capacity = 0;
+	}
 }
 
 ConfigEntry *config_any(string name)

@@ -13,6 +13,12 @@ endif
 
 all: serve_debug serve_cov serve
 
+test_config: tests/test_config.c serve.c
+	gcc $< -o $@ $(COMMON_FLAGS) $(RELEASE_FLAGS)
+
+test_config_cov: tests/test_config.c serve.c
+	gcc $< -o $@ $(COMMON_FLAGS) $(COVERAGE_FLAGS)
+
 serve: serve.c
 	gcc $< -o $@ $(COMMON_FLAGS) $(RELEASE_FLAGS)
 
