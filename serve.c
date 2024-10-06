@@ -1248,6 +1248,8 @@ bool respond_to_available_requests(Connection *conn)
 		size_t request_length = head_length + content_length;
 		if (src.size < request_length)
 			break; // Request wasn't completely received yet
+		request.content.data = src.data + head_length;
+		request.content.size = content_length;
 
 		// Reset the request timer
 		conn->start_time = now;
