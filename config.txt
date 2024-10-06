@@ -1,0 +1,53 @@
+
+# Log buffer size in bytes
+log_buff_size_b 1048576 # 1MB
+
+# Log file size limit in bytes
+log_file_limit_b 16777216 # 16MB
+
+# Log folder limit in megabytes
+log_dir_limit_mb 25600 # 25GB
+
+# Log folder
+log_dir_path logs
+
+# How often the log buffer is flushed
+log_flush_timeout_sec 3
+
+# Capacity of the server. This must be lower than the NOFILE rlimit by 2.
+# If the rlimit is 1024, max_connections can only go up to 1024-2=1022
+max_connections 1022
+
+# Maximum HTTP request count that can be server through a single TCP connection
+keep_alive_max_requests 1000
+
+# Maximum time a TCP connection is allowed to be alive
+connection_timeout_sec 60
+
+# Timeout for the closing state (when response is being flushed before the TCP
+# connection is closed)
+closing_timeout_sec 1
+
+# Request receive timeout
+request_timeout_sec 5
+
+access_log    yes
+
+# These are debug options
+show_io       no
+show_requests no
+
+# Address and port the HTTP server will listen on.
+# To bind to all available interfaces, leave a blank address blank:
+http_addr "127.0.0.1"
+http_port 8080
+
+# Address and port the HTTPS server will listen on (if the server
+# has been built with HTTPS support). To bind to all interfaces you
+# must leave the address blank.
+https_addr "127.0.0.1"
+https_port 8081
+
+# Certificate and private key files
+cert_file    "cert.pem"
+privkey_file "key.pem"

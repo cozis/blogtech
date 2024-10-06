@@ -8,7 +8,7 @@ This is a minimal web server designed to host my blog. It's built from scratch t
 
 I asked [Reddit](https://www.reddit.com/r/C_Programming/comments/1falo3b/using_my_c_web_server_to_host_a_blog_you_cant/) to [hack](https://www.reddit.com/r/hacking/comments/1fcc5hd/im_using_my_custom_c_webserver_to_host_my_blog_no/) me, which resulted in gigabytes of hilarious and malicious request logs. I saved some in `attempts.txt`, and may dig out a few more for fun someday :^)
 
-There is also a discussion on [Hacker News](https://news.ycombinator.com/item?id=41642151)
+There is also a discussion on [Hacker News](https://news.ycombinator.com/item?id=41642151).
 
 Feel free to help! At this time the main focus is on semantic correctess of HTTP and testing. I try to keep the main branch stable so remember to target the dev branch with PRs. Changes to README are fine to do on main though.
 
@@ -76,7 +76,7 @@ By default the server build is HTTP-only:
 ```
 $ make
 ```
-this generates the executables: `serve` (release build), `serve_cov` (coverage build), and `serve_debug` (debug build). Release builds listen on port 80; debug builds on port 8080.
+this generates the executables: `serve` (release build), `serve_cov` (coverage build), and `serve_debug` (debug build).
 
 To enable HTTPS, you'll need to clone BearSSL and build it. You can do so by running these commands from the root folder of this repository:
 ```
@@ -103,6 +103,40 @@ openssl req -new -x509 -key key.pem -out cert.pem -days 365
 ```
 
 # Usage
+The server loads its configuration from the `config.txt` file. You can use a different file by specifying it as command line argument `./serve my_configs.txt`. Here is an example configuration:
+```
+# Log buffer size in bytes
+log_buff_size_b 1048576 # 1MB
+
+# Log file size limit in bytes
+log_file_limit_b 16777216 # 16MB
+
+# Log folder limit in megabytes
+log_dir_limit_mb 25600 # 25GB
+
+# Log folder
+log_dir_path logs
+
+# Capacity of the server. This must be lower than the NOFILE rlimit by 2
+# If the rlimit is 1024, max_connections can only go up to 1024-2=1022
+max_connections 1022
+
+# Address and port the HTTP server will listen on.
+# To bind to all available interfaces, leave a blank address blank:
+http_addr "127.0.0.1"
+http_port 8080
+
+# Address and port the HTTPS server will listen on (if the server
+# has been built with HTTPS support). To bind to all interfaces you
+# must leave the address blank.
+https_addr "127.0.0.1"
+https_port 8081
+
+# Certificate and private key files
+cert_file    "cert.pem"
+privkey_file "key.pem"
+```
+
 The server serves static content from the `docroot/` folder. You can change this by modifying the `respond` function:
 ```c
 typedef struct {
@@ -148,6 +182,3 @@ I routinely run the server under valgrind and sanitizers (address, undefined) an
 # Known Issues
 - Server replies to HTTP/1.0 clients as HTTP/1.1
 - Server rejects HEAD requests
-
-# Contributing
-I usually work on the [DEV](https://github.com/cozis/blogtech/tree/dev) branch and merge into [MAIN](https://github.com/cozis/blogtech/tree/main) once in a while. If you open a pull requests remember to target [DEV](https://github.com/cozis/blogtech/tree/dev). It will make things easier!

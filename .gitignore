@@ -10,3 +10,6 @@ logs
 report
 3p
 backtrace.txt
+tests/test_config.txt
+test_config
+test_config_cov

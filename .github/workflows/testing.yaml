@@ -21,8 +21,9 @@ jobs:
     - name: make
       run: |
         make
+        make test_config
         mkdir bin
-        bash -c 'mv {serve,serve_cov,serve_debug} bin/'
+        bash -c 'mv {serve,serve_cov,serve_debug,test_config} bin/'
 
     - name: Temporarily save artifacts
       uses: actions/upload-artifact@v4
@@ -59,3 +60,26 @@ jobs:
         run: |
           cd tests
           python test.py
+  
+  test-config:
+    needs: [build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Retrieve saved artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts
+          path: bin
+
+      - name: Move artifacts to project root
+        run: |
+          chmod +x bin/*
+          mv bin/* .
+
+      - name: Run config tests
+        run: |
+          ./test_config

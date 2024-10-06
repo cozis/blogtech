@@ -48,6 +48,7 @@
 #include <stdbool.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <time.h>
@@ -60,46 +61,13 @@
 #define HTTPS 0
 #endif
 
-#ifdef RELEASE
-#define PORT 80
-#define HTTPS_PORT 443
-#define MAX_CONNECTIONS (1024-2)
-#define LOG_BUFFER_SIZE (1<<20)
-#define LOG_FILE_LIMIT  (1<<24)
-#define LOG_DIRECTORY_SIZE_LIMIT_MB (25 * 1024)
-#else
-#define PORT 8080
-#define HTTPS_PORT 8081
-#define MAX_CONNECTIONS 32
-#define LOG_BUFFER_SIZE (1<<10)
-#define LOG_FILE_LIMIT (1<<20)
-#define LOG_DIRECTORY_SIZE_LIMIT_MB 100
-#endif
-
-#define KEEPALIVE_MAXREQS 1000
-
-#define LOG_DIRECTORY "logs"
-
-#define HTTPS_KEY_FILE  "key.pem"
-#define HTTPS_CERT_FILE "cert.pem"
-
 #define BACKTRACE        1
 #define BACKTRACE_FILE   "backtrace.txt"
 #define BACKTRACE_LIMIT 30
 
 #define EOPALLOC      0
 #define PROFILE       0
-#define ACCESS_LOG    1
-#define SHOW_IO       0
-#define SHOW_REQUESTS 0
-#define REQUEST_TIMEOUT_SEC     5
-#define CLOSING_TIMEOUT_SEC     2
-#define CONNECTION_TIMEOUT_SEC 60
-#define LOG_FLUSH_TIMEOUT_SEC   3
 #define INPUT_BUFFER_LIMIT_MB   1
-
-
-static_assert(LOG_BUFFER_SIZE < LOG_FILE_LIMIT, "");
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// OPTIONAL HEADERS                                                                        ///
@@ -140,13 +108,13 @@ typedef struct {
 #define NULLSTR ((string) {.data=NULL, .size=0})
 
 #ifndef NDEBUG
-#define DEBUG(fmt, ...) fprintf(stderr, fmt, ## __VA_ARGS__)
+#define DEBUG(fmt, ...) write_format_to_stderr(fmt, ## __VA_ARGS__)
 #else
 #define DEBUG(...) {}
 #endif
 
 #if PROFILE
-#define TIME(label) for (uint64_t start__ = __rdtsc(), done__ = 0; !done__; timed_scope_result(__COUNTER__, __rdtsc() - start__, LIT(label)), (done__=1))
+#define TIME(label) for (uint64_t start__ = __rdtsc(), done__ = 0; !done__; timing_result(__COUNTER__, __rdtsc() - start__, LIT(label)), (done__=1))
 #else
 #define TIME(...)
 #endif
@@ -261,45 +229,53 @@ typedef struct {
 /// FORWARD DECLARATIONS                                                                    ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-void   log_init(void);
-void   log_free(void);
-void   log_data(string str);
-void   log_fatal(string str);
-void   log_perror(string str);
-void   log_format(const char *fmt, ...);
-void   log_flush(void);
-bool   log_empty(void);
+void     config_init(void);
+void     config_free(void);
+bool     config_load(string file);
+uint32_t config_int(string name);
+bool     config_bool(string name);
+string   config_string(string name);
 
-void   byte_queue_init(ByteQueue *q);
-void   byte_queue_free(ByteQueue *q);
-size_t byte_queue_size(ByteQueue *q);
-bool   byte_queue_ensure_min_free_space(ByteQueue *q, size_t num);
-string byte_queue_start_write(ByteQueue *q);
-void   byte_queue_end_write(ByteQueue *q, size_t num);
-string byte_queue_start_read(ByteQueue *q);
-void   byte_queue_end_read(ByteQueue *q, size_t num);
-bool   byte_queue_write(ByteQueue *q, string src);
-void   byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
+void     log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffer_size);
+void     log_free(void);
+void     log_data(string str);
+void     log_fatal(string str);
+void     log_perror(string str);
+void     log_format(const char *fmt, ...);
+void     log_flush(void);
+bool     log_empty(void);
+
+void     byte_queue_init(ByteQueue *q);
+void     byte_queue_free(ByteQueue *q);
+size_t   byte_queue_size(ByteQueue *q);
+bool     byte_queue_ensure_min_free_space(ByteQueue *q, size_t num);
+string   byte_queue_start_write(ByteQueue *q);
+void     byte_queue_end_write(ByteQueue *q, size_t num);
+string   byte_queue_start_read(ByteQueue *q);
+void     byte_queue_end_read(ByteQueue *q, size_t num);
+bool     byte_queue_write(ByteQueue *q, string src);
+void     byte_queue_patch(ByteQueue *q, size_t offset, char *src, size_t len);
 
 #if PROFILE
-void   timing_init(void);
-void   print_timing_results(void);
-void   timed_scope_result(int scope_index, uint64_t delta_cycles, string label);
+void     timing_init(void);
+void     timing_result(int scope_index, uint64_t delta_cycles, string label);
+void     timing_print_results(void);
 #endif
 
 #if HTTPS
-bool   load_private_key_from_file(string file, PrivateKey *pkey);
-void   free_private_key(PrivateKey *pkey);
-bool   load_certs_from_file(string file, CertArray *array);
-void   free_certs(CertArray *array);
+bool     load_private_key_from_file(string file, PrivateKey *pkey);
+void     free_private_key(PrivateKey *pkey);
+bool     load_certs_from_file(string file, CertArray *array);
+void     free_certs(CertArray *array);
 BearSSLErrorInfo get_bearssl_error_info(int code);
 #endif
 
-char   to_lower(char c);
-bool   is_print(char c);
-bool   is_pcomp(char c);
-bool   is_digit(char c);
-bool   is_space(char c);
+char     to_lower(char c);
+bool     is_print(char c);
+bool     is_pcomp(char c);
+bool     is_digit(char c);
+bool     is_alpha(char c);
+bool     is_space(char c);
 
 string trim(string s);
 string substr(string str, size_t start, size_t end);
@@ -318,9 +294,12 @@ uint64_t get_monotonic_time_ns(void);
 
 bool   load_file_contents(string file, string *out);
 bool   set_blocking(int fd, bool blocking);
+bool   write_string_to_stderr(string s);
+bool   write_format_to_stderr(const char *fmt, ...);
+bool   write_format_to_stderr_va(const char *fmt, va_list args);
 bool   read_from_socket(int fd, ByteQueue *queue);
 bool   write_to_socket(int fd, ByteQueue *queue);
-int    create_listening_socket(int port);
+int    create_listening_socket(string addr, int port);
 
 void   status_line(ResponseBuilder *b, int status);
 void   add_header(ResponseBuilder *b, string header);
@@ -337,8 +316,11 @@ bool   serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot, stri
 
 volatile sig_atomic_t stop = 0;
 
-Connection conns[MAX_CONNECTIONS];
+Connection *conns;
 int num_conns = 0;
+int max_conns = 0;
+
+struct pollfd *pollarray;
 
 uint64_t now;
 uint64_t real_now;
@@ -346,17 +328,19 @@ uint64_t real_now;
 int insecure_fd;
 int secure_fd;
 
+bool show_io;
+bool show_requests;
+bool access_log;
+int keep_alive_max_requests;
+int connection_timeout_sec;
+int closing_timeout_sec;
+int request_timeout_sec;
+int log_flush_timeout_sec;
+
 #if HTTPS
 PrivateKey pkey;
 CertArray certs;
 #endif
-
-int    log_last_file_index = 0;
-int    log_fd = -1;
-char  *log_buffer = NULL;
-size_t log_buffer_used = 0;
-bool   log_failed = false;
-size_t log_total_size = 0;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// IMPLEMENTATION                                                                          ///
@@ -415,72 +399,137 @@ void termination_signal_handler(int signo)
 	stop = 1;
 }
 
-void init_globals(void)
+void init_globals(int argc, char **argv)
 {
+	atexit(log_free);
+
+	string config_file = argc > 1 ? STR(argv[1]) : LIT("config.txt");
+	if (!config_load(config_file))
+		exit(-1);
+
+	access_log              = config_bool(LIT("access_log"));
+	show_io                 = config_bool(LIT("show_io"));
+	show_requests           = config_bool(LIT("show_requests"));
+	keep_alive_max_requests = config_int(LIT("keep_alive_max_requests"));
+	connection_timeout_sec  = config_int(LIT("connection_timeout_sec"));
+	closing_timeout_sec     = config_int(LIT("closing_timeout_sec"));
+	request_timeout_sec     = config_int(LIT("request_timeout_sec"));
+	log_flush_timeout_sec   = config_int(LIT("log_flush_timeout_sec"));
+
+	// Setup signal handlers
+	{
 #if BACKTRACE
-	struct sigaction sa_crash;
-	sa_crash.sa_handler = crash_signal_handler;
-	sigemptyset(&sa_crash.sa_mask);
-	sa_crash.sa_flags = SA_RESTART | SA_NODEFER;
-	sigaction(SIGSEGV, &sa_crash, NULL);
-	sigaction(SIGABRT, &sa_crash, NULL);
-	sigaction(SIGFPE,  &sa_crash, NULL);
-	sigaction(SIGILL,  &sa_crash, NULL);
+		struct sigaction sa_crash;
+		sa_crash.sa_handler = crash_signal_handler;
+		sigemptyset(&sa_crash.sa_mask);
+		sa_crash.sa_flags = SA_RESTART | SA_NODEFER;
+		sigaction(SIGSEGV, &sa_crash, NULL);
+		sigaction(SIGABRT, &sa_crash, NULL);
+		sigaction(SIGFPE,  &sa_crash, NULL);
+		sigaction(SIGILL,  &sa_crash, NULL);
 #endif
 
-	struct sigaction sa_term;
-	sa_term.sa_handler = termination_signal_handler;
-	sigemptyset(&sa_term.sa_mask);
-	sa_term.sa_flags = SA_RESTART;
-	sigaction(SIGTERM, &sa_term, NULL);
-	sigaction(SIGQUIT, &sa_term, NULL);
-	sigaction(SIGINT,  &sa_term, NULL);
+		struct sigaction sa_term;
+		sa_term.sa_handler = termination_signal_handler;
+		sigemptyset(&sa_term.sa_mask);
+		sa_term.sa_flags = SA_RESTART;
+		sigaction(SIGTERM, &sa_term, NULL);
+		sigaction(SIGQUIT, &sa_term, NULL);
+		sigaction(SIGINT,  &sa_term, NULL);
 
-	DEBUG("Signals configured\n");
+		DEBUG("Signals configured\n");
+	}
 
-	log_init();
-	log_data(LIT("starting\n"));
+	// Setup logging
+	{
+		log_init(
+			config_string(LIT("log_dir_path")),
+			config_int(LIT("log_dir_limit_mb")),
+			config_int(LIT("log_file_limit_b")),
+			config_int(LIT("log_buff_size_b"))
+		);
+		log_data(LIT("starting\n"));
+		DEBUG("Logger configured\n");
+	}
 
 #if PROFILE
 	timing_init();
 #endif
 
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
-		conns[i].fd = -1;
-		byte_queue_init(&conns[i].input);
-		byte_queue_init(&conns[i].output);
+	// Setup connection arrays
+	{
+		struct rlimit file_desc_limit;
+		if (getrlimit(RLIMIT_NOFILE, &file_desc_limit))
+			log_fatal(LIT("Couldn't query RLIMIT_NOFILE\n"));
+
+		max_conns = config_int(LIT("max_connections"));
+		num_conns = 0;
+		if ((size_t) max_conns+2 > file_desc_limit.rlim_cur)
+			log_fatal(LIT("max_connections+2 is higher than the rlimit\n"));
+
+		conns = mymalloc(max_conns * sizeof(Connection));
+		if (conns == NULL)
+			log_fatal(LIT("Out of memory"));
+
+		for (int i = 0; i < max_conns; i++) {
+			conns[i].fd = -1;
+			byte_queue_init(&conns[i].input);
+			byte_queue_init(&conns[i].output);
+		}
+
+		pollarray = mymalloc((max_conns+2) * sizeof(struct pollfd));
+		if (pollarray == NULL)
+			log_fatal(LIT("Out of memory"));
+
+		DEBUG("Connection array created\n");
 	}
 
-	insecure_fd = create_listening_socket(PORT);
-	if (insecure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
-	log_format("Listening on port %d\n", PORT);
+	// Create plain text listener
+	{
+		string   http_addr = config_string(LIT("http_addr"));
+		uint32_t http_port = config_int(LIT("http_port"));
+		insecure_fd = create_listening_socket(http_addr, http_port);
+		if (insecure_fd < 0)
+			log_fatal(LIT("Couldn't bind\n"));
+		log_format("Listening on %.*s:%d\n", (int) http_addr.size, http_addr.data, http_port);
+		DEBUG("HTTP started\n");
+	}
 
-	DEBUG("HTTP started\n");
-
+	// Create secure listener
+	{
+		secure_fd = -1;
 #if HTTPS
-	secure_fd = create_listening_socket(HTTPS_PORT);
-	if (secure_fd < 0) log_fatal(LIT("Couldn't bind\n"));
-	log_format("Listening on port %d\n", HTTPS_PORT);
+		string   https_addr = config_string(LIT("https_addr"));
+		uint32_t https_port = config_int(LIT("https_port"));
+		string   https_cert_file = config_string(LIT("cert_file"));
+		string   https_key_file  = config_string(LIT("privkey_file"));
 
-	if (!load_certs_from_file(LIT(HTTPS_CERT_FILE), &certs))
-		log_fatal(LIT("Couldn't load certificates\n"));
-	DEBUG("Certificates loaded\n");
+		secure_fd = create_listening_socket(https_addr, https_port);
+		if (secure_fd < 0)
+			log_fatal(LIT("Couldn't bind\n"));
+		log_format("Listening on %.*s:%d\n", (int) https_addr.size, https_addr.data, https_port);
 
-	if (!load_private_key_from_file(LIT(HTTPS_KEY_FILE), &pkey))
-		log_fatal(LIT("Couldn't load private key\n"));
-	DEBUG("Private key loaded\n");
+		// Load certificate
+		if (!load_certs_from_file(https_cert_file, &certs))
+			log_fatal(LIT("Couldn't load certificates\n"));
+		DEBUG("Certificates loaded\n");
 
-	DEBUG("HTTPS started\n");
-#else
-	secure_fd = -1;
+		// Load private key
+		if (!load_private_key_from_file(https_key_file, &pkey))
+			log_fatal(LIT("Couldn't load private key\n"));
+		DEBUG("Private key loaded\n");
+
+		DEBUG("HTTPS started\n");
 #endif
+	}
+
+	config_free();
 }
 
 void free_globals(void)
 {
-
 #if PROFILE
-	print_timing_results();
+	timing_print_results();
 #endif
 
 #if HTTPS
@@ -491,15 +540,17 @@ void free_globals(void)
 
 	close(insecure_fd);
 
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+	for (int i = 0; i < max_conns; i++) {
 		if (conns[i].fd != -1) {
 			close(conns[i].fd);
 			byte_queue_free(&conns[i].input);
 			byte_queue_free(&conns[i].output);
 		}
 	}
-	log_data(LIT("closing\n"));
+	myfree(conns, max_conns * sizeof(Connection));
+	myfree(pollarray, (max_conns+2) * sizeof(struct pollfd));
 
+	log_data(LIT("closing\n"));
 	log_free();
 }
 
@@ -1062,15 +1113,15 @@ bool should_keep_alive(Connection *conn)
 		return false;
 
 	// Don't keep alive if the request is too old
-	if (now - conn->creation_time > CONNECTION_TIMEOUT_SEC * 1000)
+	if (now - conn->creation_time > (uint64_t) connection_timeout_sec * 1000)
 		return false;
 
 	// Don't keep alive if we served a lot of requests to this connection
-	if (conn->served_count > KEEPALIVE_MAXREQS)
+	if (conn->served_count > keep_alive_max_requests)
 		return false;
 
 	// Don't keep alive if the server is more than 70% full
-	if (num_conns > 0.7 * MAX_CONNECTIONS)
+	if (num_conns > 0.7 * max_conns)
 		return false;
 
 	return true;
@@ -1078,7 +1129,7 @@ bool should_keep_alive(Connection *conn)
 
 uint64_t deadline_of(Connection *conn)
 {
-	return conn->start_time + (conn->closing ? CLOSING_TIMEOUT_SEC : REQUEST_TIMEOUT_SEC) * 1000;
+	return conn->start_time + (conn->closing ? closing_timeout_sec : request_timeout_sec) * 1000;
 }
 
 bool respond_to_available_requests(Connection *conn)
@@ -1099,18 +1150,17 @@ bool respond_to_available_requests(Connection *conn)
 
 		size_t head_length = j+4;
 
-#if SHOW_REQUESTS
-		print_bytes(LIT(""), (string) {src.data, head_length});
-		log_data(LIT("\n"));
-#endif
+		if (show_requests) {
+			print_bytes(LIT(""), (string) {src.data, head_length});
+			log_data(LIT("\n"));
+		}
 
 		// Found! We got the request head
 
 		Request request;
 		int res = parse_request_head((string) {src.data, head_length}, &request);
 
-#if ACCESS_LOG
-		TIME("log_access") {
+		if (access_log) TIME("log_access") {
 			// Log access
 			time_t real_now_in_secs = real_now / 1000;
 			struct tm timeinfo;
@@ -1139,7 +1189,6 @@ bool respond_to_available_requests(Connection *conn)
 				log_format("%s - %s - Bad request\n", timebuf, ipstr);
 			}
 		}
-#endif
 
 		if (res != P_OK) {
 			// Invalid HTTP request
@@ -1199,6 +1248,8 @@ bool respond_to_available_requests(Connection *conn)
 		size_t request_length = head_length + content_length;
 		if (src.size < request_length)
 			break; // Request wasn't completely received yet
+		request.content.data = src.data + head_length;
+		request.content.size = content_length;
 
 		// Reset the request timer
 		conn->start_time = now;
@@ -1237,15 +1288,15 @@ bool respond_to_available_requests(Connection *conn)
 	return remove;
 }
 
-void build_poll_array(struct pollfd pollarray[static MAX_CONNECTIONS+2], int *timeout)
+void build_poll_array(struct pollfd *pollarray, int *timeout)
 {
 	pollarray[0].fd = insecure_fd;
-	pollarray[0].events = (num_conns < MAX_CONNECTIONS ? POLLIN : 0);
+	pollarray[0].events = (num_conns < max_conns ? POLLIN : 0);
 	pollarray[0].revents = 0;
 
 #if HTTPS
 	pollarray[1].fd = secure_fd;
-	pollarray[1].events = (num_conns < MAX_CONNECTIONS ? POLLIN : 0);
+	pollarray[1].events = (num_conns < max_conns ? POLLIN : 0);
 	pollarray[1].revents = 0;
 #else
 	pollarray[1].fd = -1;
@@ -1255,7 +1306,7 @@ void build_poll_array(struct pollfd pollarray[static MAX_CONNECTIONS+2], int *ti
 
 	Connection *oldest = NULL;
 
-	for (int i = 0; i < MAX_CONNECTIONS; i++) {
+	for (int i = 0; i < max_conns; i++) {
 
 		Connection *conn = &conns[i];
 
@@ -1341,9 +1392,9 @@ bool accept_connection(int listen_fd, bool https)
 {
 	// Look for a connection structure
 	int index = 0;
-	while (index < MAX_CONNECTIONS && conns[index].fd != -1)
+	while (index < max_conns && conns[index].fd != -1)
 		index++;
-	if (index == MAX_CONNECTIONS)
+	if (index == max_conns)
 		return false; // Stop listening for incoming connections
 
 	struct sockaddr_in accepted_addr;
@@ -1368,7 +1419,7 @@ bool accept_connection(int listen_fd, bool https)
 	Connection *conn = &conns[index];
 	init_connection(conn, accepted_fd, ipaddr, https);
 
-	assert(num_conns < MAX_CONNECTIONS);
+	assert(num_conns < max_conns);
 	num_conns++;
 
 	return true;
@@ -1456,9 +1507,10 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			string dst = byte_queue_start_write(&conn->input);
 			assert(dst.size >= len);
 			memcpy(dst.data, buf, len);
-#if SHOW_IO
-			print_bytes(LIT("> "), (string) {dst.data, len});
-#endif
+
+			if (show_io)
+				print_bytes(LIT("> "), (string) {dst.data, len});
+
 			byte_queue_end_write(&conn->input, len);
 			br_ssl_engine_recvapp_ack(cc, len);
 			if (respond_to_available_requests(conn))
@@ -1500,9 +1552,10 @@ bool update_connection_https(Connection *conn, struct pollfd *polldata)
 			string src = byte_queue_start_read(&conn->output);
 			size_t copy = MIN(len, src.size);
 			memcpy(buf, src.data, copy);
-#if SHOW_IO
-			print_bytes(LIT("< "), (string) {src.data, copy});
-#endif
+
+			if (show_io)
+				print_bytes(LIT("< "), (string) {src.data, copy});
+
 			byte_queue_end_read(&conn->output, copy);
 			br_ssl_engine_sendapp_ack(cc, copy);
 			br_ssl_engine_flush(cc, 0); // TODO: Is this the right time to call it?
@@ -1538,19 +1591,10 @@ bool update_connection(Connection *conn, struct pollfd *polldata)
 	return ok;
 }
 
+#ifndef NOMAIN
 int main(int argc, char **argv)
 {
-	(void) argc;
-	(void) argv;
-
-	init_globals();
-
-	log_format("BACKTRACE=%d\n", BACKTRACE);
-	log_format("EOPALLOC=%d\n", EOPALLOC);
-	log_format("PROFILE=%d\n", PROFILE);
-	log_format("ACCESS_LOG=%d\n", ACCESS_LOG);
-	log_format("SHOW_IO=%d\n", SHOW_IO);
-	log_format("SHOW_REQUESTS=%d\n", SHOW_REQUESTS);
+	init_globals(argc, argv);
 
 	DEBUG("Globals initialized\n");
 
@@ -1558,18 +1602,17 @@ int main(int argc, char **argv)
 	while (!stop) {
 
 		int timeout;
-		struct pollfd pollarray[MAX_CONNECTIONS+2];
 		build_poll_array(pollarray, &timeout);
 
 		if (!log_empty()) {
-			int log_timeout = (last_log_time + LOG_FLUSH_TIMEOUT_SEC * 1000) - now;
+			int log_timeout = (last_log_time + log_flush_timeout_sec * 1000) - now;
 			if (timeout < 0)
 				timeout = log_timeout;
 			else
 				timeout = MIN(log_timeout, timeout);
 		}
 
-		int ret = poll(pollarray, MAX_CONNECTIONS+2, timeout);
+		int ret = poll(pollarray, max_conns+2, timeout);
 		if (ret < 0) {
 			if (errno == EINTR)
 				break; // TODO: Should this be continue?
@@ -1588,7 +1631,7 @@ int main(int argc, char **argv)
 			while (accept_connection(secure_fd, true));
 #endif
 
-		for (int i = 0; i < MAX_CONNECTIONS; i++) {
+		for (int i = 0; i < max_conns; i++) {
 
 			Connection *conn = &conns[i];
 			if (conn->fd == -1)
@@ -1632,7 +1675,7 @@ int main(int argc, char **argv)
 			}
 		}
 
-		if (now - last_log_time > LOG_FLUSH_TIMEOUT_SEC * 1000) {
+		if (now - last_log_time > (uint64_t) log_flush_timeout_sec * 1000) {
 			log_flush();
 			last_log_time = now;
 		}
@@ -1642,6 +1685,7 @@ int main(int argc, char **argv)
 	free_globals();
 	return 0;
 }
+#endif
 
 #define PATH_SEP '/'
 
@@ -1964,14 +2008,26 @@ bool serve_file_or_dir(ResponseBuilder *b, string prefix, string docroot,
 /// LOGGER                                                                                  ///
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
+bool   log_initialized = false;
+int    log_last_file_index = 0;
+int    log_fd = -1;
+char  *log_buffer = NULL;
+size_t log_buffer_used = 0;
+size_t log_buffer_size = 0;
+bool   log_failed = false;
+size_t log_total_size = 0;
+size_t log_dir_limit_mb = 0;
+size_t log_file_limit_b = 0;
+char   log_dir[1<<12];
+
 void log_choose_file_name(char *dst, size_t max, bool startup)
 {
 	size_t prev_size = -1;
 	for (;;) {
 
-		int num = snprintf(dst, max, LOG_DIRECTORY "/log_%d.txt", log_last_file_index);
+		int num = snprintf(dst, max, "%s/log_%d.txt", log_dir, log_last_file_index);
 		if (num < 0 || (size_t) num >= max) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -1981,14 +2037,14 @@ void log_choose_file_name(char *dst, size_t max, bool startup)
 		if (stat(dst, &buf)) {
 			if (errno == ENOENT)
 				break;
-			fprintf(stderr, "log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
+			write_format_to_stderr("log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
 		prev_size = (size_t) buf.st_size;
 
 		if (log_last_file_index == 100000000) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -1996,13 +2052,13 @@ void log_choose_file_name(char *dst, size_t max, bool startup)
 	}
 
 	// At startup don't create a new log file if the last one didn't reache its limit
-	if (startup && prev_size < LOG_FILE_LIMIT) {
+	if (startup && prev_size < log_file_limit_b) {
 
 		log_last_file_index--;
 
-		int num = snprintf(dst, max, LOG_DIRECTORY "/log_%d.txt", log_last_file_index);
+		int num = snprintf(dst, max, "%s/log_%d.txt", log_dir, log_last_file_index);
 		if (num < 0 || (size_t) num >= max) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2010,19 +2066,26 @@ void log_choose_file_name(char *dst, size_t max, bool startup)
 	}
 }
 
-void log_init(void)
+void log_init(string dir, size_t dir_limit_mb, size_t file_limit_b, size_t buffer_size)
 {
-	atexit(log_free);
+	// Copy args to "local" variables
+	if (dir.size >= sizeof(log_dir))
+		log_fatal(LIT("Log directory is too long\n"));
+	memcpy(log_dir, dir.data, dir.size);
+	log_dir[dir.size] = '\0';
+	log_buffer_size = buffer_size;
+	log_dir_limit_mb = dir_limit_mb;
+	log_file_limit_b = file_limit_b;
 
-	log_buffer = mymalloc(LOG_BUFFER_SIZE);
+	log_buffer = mymalloc(log_buffer_size);
 	if (log_buffer == NULL) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
 
-	if (mkdir(LOG_DIRECTORY, 0755) && errno != EEXIST) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+	if (mkdir(log_dir, 0755) && errno != EEXIST) {
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
@@ -2033,27 +2096,27 @@ void log_init(void)
 
 	log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 	if (log_fd < 0) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
 
 	log_total_size = 0;
 
-	DIR *d = opendir(LOG_DIRECTORY);
+	DIR *d = opendir(log_dir);
 	if (d == NULL) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
-	struct dirent *dir;
-	while ((dir = readdir(d))) {
+	struct dirent *dir_entry;
+	while ((dir_entry = readdir(d))) {
 
-		if (!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
+		if (!strcmp(dir_entry->d_name, ".") || !strcmp(dir_entry->d_name, ".."))
 			continue;
 
 		char path[1<<12];
-		int k = snprintf(path, SIZEOF(path), LOG_DIRECTORY "/%s", dir->d_name);
+		int k = snprintf(path, SIZEOF(path), "%s/%s", log_dir, dir_entry->d_name);
 		if (k < 0 || k >= SIZEOF(path)) log_fatal(LIT("Bad format"));
 		path[k] = '\0';
 
@@ -2068,24 +2131,31 @@ void log_init(void)
 	closedir(d);
 
 	static_assert(SIZEOF(size_t) > 4, "It's assumed size_t can store a number of bytes in the order of 10gb");
-	if (log_total_size > (size_t) LOG_DIRECTORY_SIZE_LIMIT_MB * 1024 * 1024) {
-		fprintf(stderr, "Log reached disk limit at startup\n");
+	if (log_total_size > log_dir_limit_mb * 1024 * 1024) {
+		write_string_to_stderr(LIT("Log reached disk limit at startup\n"));
 		log_failed = true;
 		return;
 	}
+
+	log_initialized = true;
 }
 
 void log_free(void)
 {
-	if (log_buffer) {
+	if (log_initialized) {
 		log_flush();
 		if (log_fd > -1)
 			close(log_fd);
-		myfree(log_buffer, LOG_BUFFER_SIZE);
+		myfree(log_buffer, log_buffer_size);
 		log_fd = -1;
 		log_buffer = NULL;
 		log_buffer_used = 0;
+		log_buffer_size = 0;
 		log_failed = false;
+		log_file_limit_b = 0;
+		log_dir_limit_mb = 0;
+		log_dir[0] = '\0';
+		log_initialized = false;
 	}
 }
 
@@ -2096,7 +2166,7 @@ bool log_empty(void)
 
 void log_flush(void)
 {
-	if (log_failed || log_buffer_used == 0)
+	if (!log_initialized || log_failed || log_buffer_used == 0)
 		return;
 
 	/*
@@ -2104,12 +2174,12 @@ void log_flush(void)
 	 */
 	struct stat buf;
 	if (fstat(log_fd, &buf)) {
-		fprintf(stderr, "log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
+		write_format_to_stderr("log_failed: %s (%s:%d)\n", strerror(errno), __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
 
-	if (buf.st_size + log_buffer_used >= LOG_FILE_LIMIT) {
+	if (buf.st_size + log_buffer_used >= log_file_limit_b) {
 
 		char name[1<<12];
 		log_choose_file_name(name, SIZEOF(name), false);
@@ -2118,7 +2188,7 @@ void log_flush(void)
 		close(log_fd);
 		log_fd = open(name, O_WRONLY | O_APPEND | O_CREAT, 0644);
 		if (log_fd < 0) {
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2135,7 +2205,7 @@ void log_flush(void)
 		if (num < 0) {
 			if (errno == EINTR)
 				continue;
-			fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+			write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 			log_failed = true;
 			return;
 		}
@@ -2143,7 +2213,7 @@ void log_flush(void)
 		if (num == 0) {
 			zeros++;
 			if (zeros == 1000) {
-				fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+				write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 				log_failed = true;
 				return;
 			}
@@ -2154,8 +2224,8 @@ void log_flush(void)
 		copied += num;
 		log_total_size += num;
 
-		if (log_total_size > (size_t) LOG_DIRECTORY_SIZE_LIMIT_MB * 1024 * 1024) {
-			fprintf(stderr, "Log reached disk limit\n");
+		if (log_total_size > log_dir_limit_mb * 1024 * 1024) {
+			write_string_to_stderr(LIT("Log reached disk limit\n"));
 			log_failed = true;
 			return;
 		}
@@ -2173,10 +2243,18 @@ void log_fatal(string str)
 
 void log_format(const char *fmt, ...)
 {
+	if (!log_initialized) {
+		va_list args;
+		va_start(args, fmt);
+		write_format_to_stderr_va(fmt, args);
+		va_end(args);
+		return;
+	}
+
 	if (log_failed)
 		return;
 
-	if (log_buffer_used == LOG_BUFFER_SIZE) {
+	if (log_buffer_used == log_buffer_size) {
 		log_flush();
 		if (log_failed) return;
 	}
@@ -2185,24 +2263,24 @@ void log_format(const char *fmt, ...)
 	{
 		va_list args;
 		va_start(args, fmt);
-		num = vsnprintf(log_buffer + log_buffer_used, LOG_BUFFER_SIZE - log_buffer_used, fmt, args);
+		num = vsnprintf(log_buffer + log_buffer_used, log_buffer_size - log_buffer_used, fmt, args);
 		va_end(args);
 	}
 
-	if (num < 0 || num > LOG_BUFFER_SIZE) {
-		fprintf(stderr, "log_failed (%s:%d)\n", __FILE__, __LINE__);
+	if (num < 0 || (size_t) num > log_buffer_size) {
+		write_format_to_stderr("log_failed (%s:%d)\n", __FILE__, __LINE__);
 		log_failed = true;
 		return;
 	}
 
-	if ((size_t) num > LOG_BUFFER_SIZE - log_buffer_used) {
+	if ((size_t) num > log_buffer_size - log_buffer_used) {
 		
 		log_flush();
 		if (log_failed) return;
 
 		va_list args;
 		va_start(args, fmt);
-		int k = vsnprintf(log_buffer + log_buffer_used, LOG_BUFFER_SIZE - log_buffer_used, fmt, args);
+		int k = vsnprintf(log_buffer + log_buffer_used, log_buffer_size - log_buffer_used, fmt, args);
 		va_end(args);
 
 		if (k != num) log_fatal(LIT("Bad format"));
@@ -2213,17 +2291,22 @@ void log_format(const char *fmt, ...)
 
 void log_data(string str)
 {
+	if (!log_initialized) {
+		fwrite(str.data, 1, str.size, stdout);
+		return;
+	}
+
 	if (log_failed)
 		return;
 
-	if (str.size > LOG_BUFFER_SIZE)
+	if (str.size > log_buffer_size)
 		str = LIT("Log message was too long to log");
 
-	if (str.size > LOG_BUFFER_SIZE - log_buffer_used) {
+	if (str.size > log_buffer_size - log_buffer_used) {
 		log_flush();
 		if (log_failed) return;
 	}
-	assert(str.size <= LOG_BUFFER_SIZE - log_buffer_used);
+	assert(str.size <= log_buffer_size - log_buffer_used);
 
 	assert(log_buffer);
 	memcpy(log_buffer + log_buffer_used, str.data, str.size);
@@ -2232,7 +2315,10 @@ void log_data(string str)
 
 void log_perror(string str)
 {
-	log_format("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
+	if (!log_initialized)
+		write_format_to_stderr("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
+	else
+		log_format("%.*s: %s\n", (int) str.size, str.data, strerror(errno));
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -2335,6 +2421,11 @@ string substr(string str, size_t start, size_t end)
 bool is_digit(char c)
 {
 	return c >= '0' && c <= '9';
+}
+
+bool is_alpha(char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
 }
 
 bool is_space(char c)
@@ -2599,9 +2690,10 @@ bool read_from_socket(int fd, ByteQueue *queue)
 			remove = true;
 			break;
 		}
-#if SHOW_IO
-		print_bytes(LIT("> "), (string) {dst.data, num});
-#endif
+
+		if (show_io)
+			print_bytes(LIT("> "), (string) {dst.data, num});
+
 		byte_queue_end_write(queue, (size_t) num);
 
 		// Input buffer can't go over 20Mb
@@ -2633,16 +2725,16 @@ bool write_to_socket(int fd, ByteQueue *queue)
 			break;
 		}
 
-#if SHOW_IO
-		print_bytes(LIT("< "), (string) {src.data, num});
-#endif
+		if (show_io)
+			print_bytes(LIT("< "), (string) {src.data, num});
+
 		byte_queue_end_read(queue, (size_t) num);
 	}
 
 	return remove;
 }
 
-int create_listening_socket(int port)
+int create_listening_socket(string addr, int port)
 {
 	int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
 	if (listen_fd < 0) {
@@ -2658,11 +2750,26 @@ int create_listening_socket(int port)
 	int one = 1;
 	setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, (char*) &one, sizeof(one));
 
-	struct sockaddr_in addr;
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(port);
-	addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	if (bind(listen_fd, (struct sockaddr*) &addr, sizeof(addr))) {
+	struct in_addr addr2;
+	if (addr.size == 0)
+		addr2.s_addr = htonl(INADDR_ANY);
+	else {
+		assert(addr.data);
+		char addr_copy[INET_ADDRSTRLEN];
+		if (addr.size >= SIZEOF(addr_copy))
+			log_fatal(LIT("Invalid IP address (too long)\n"));
+		memcpy(addr_copy, addr.data, addr.size);
+		addr_copy[addr.size] = '\0';
+		int res = inet_pton(AF_INET, addr_copy, &addr2);
+		if (res == 0) log_fatal(LIT("Invalid IP address (too long)\n"));
+		if (res != 1) log_fatal(LIT("Could not parse IP address (internal error)\n"));
+	}
+
+	struct sockaddr_in addr3;
+	addr3.sin_family = AF_INET;
+	addr3.sin_port = htons(port);
+	addr3.sin_addr = addr2;
+	if (bind(listen_fd, (struct sockaddr*) &addr3, sizeof(addr3))) {
 		log_perror(LIT("bind"));
 		return -1;
 	}
@@ -2691,6 +2798,42 @@ bool set_blocking(int fd, bool blocking)
 		return false;
 
 	return true;
+}
+
+bool write_string_to_stderr(string s)
+{
+	int fd = STDERR_FILENO;
+	size_t num = 0;
+	while (num < s.size) {
+		int ret = write(fd, s.data + num, s.size - num);
+		if (ret < 0) {
+			if (errno == EINTR)
+				continue;
+			return false;
+		}
+		num += ret;
+	};
+	return true;
+}
+
+bool write_format_to_stderr_va(const char *fmt, va_list args)
+{
+	char buf[1<<10];
+
+	int num = vsnprintf(buf, sizeof(buf), fmt, args);
+	if (num < 0) log_fatal(LIT("Invalid format"));
+
+	string str = {buf, num};
+	return write_string_to_stderr(str);
+}
+
+bool write_format_to_stderr(const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	bool ok = write_format_to_stderr_va(fmt, args);
+	va_end(args);
+	return ok;
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
@@ -2726,14 +2869,14 @@ void human_readable_time_interval(uint64_t ns, char *dst, size_t max)
         snprintf(dst, max, "%.1Lf ns", (long double) ns);
 }
 
-void print_timing_results(void)
+void timing_print_results(void)
 {
 	uint64_t end_cycles = __rdtsc();
 	uint64_t end_ns = get_monotonic_time_ns();
 
 	double cy2ns = (double) (end_ns - timing_init_time_ns) / (end_cycles - timing_init_time_cycles);
 
-	printf("Printing timing results\n");
+	write_format_to_stderr("Printing timing results\n");
 	for (int i = 0; i < COUNTOF(timed_scopes); i++) {
 		TimedScope scope = timed_scopes[i];
 		if (scope.exec_count == 0)
@@ -2744,13 +2887,13 @@ void print_timing_results(void)
 		human_readable_time_interval(cy2ns * scope.delta_cycles, total_str, sizeof(total_str));
 		human_readable_time_interval(cy2ns * scope.delta_cycles / scope.exec_count, average_str, sizeof(average_str));
 
-		printf("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
+		write_format_to_stderr("%-20.*s| tot %s\t| avg %s\t| calls %lu\n",
 			(int) scope.label.size, scope.label.data,
 			total_str, average_str, scope.exec_count);
 	}
 }
 
-void timed_scope_result(int scope_index, uint64_t delta_cycles, string label)
+void timing_result(int scope_index, uint64_t delta_cycles, string label)
 {
 	timed_scopes[scope_index].label = label;
 	timed_scopes[scope_index].delta_cycles += delta_cycles;
@@ -2811,6 +2954,281 @@ void myfree(void *ptr, size_t num)
 	free(ptr);
 }
 #endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+/// CONFIGURATION PARSER                                                                    ///
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+typedef enum {
+	CE_INT,
+	CE_STR,
+	CE_BOOL,
+} ConfigEntryType;
+
+typedef struct {
+	string name;
+	ConfigEntryType type;
+	union {
+		uint32_t num;
+		string   txt;
+		bool     yes;
+	};
+} ConfigEntry;
+
+string       config_content;
+ConfigEntry *config_entries;
+int          config_count;
+int          config_capacity;
+
+void make_char_printable(char *buf, size_t max, char c)
+{
+	(void) max;
+
+	if (is_print(c)) {
+		assert(max >= 4);
+		buf[0] = '\'';
+		buf[1] = c;
+		buf[2] = '\'';
+		buf[3] = '\0';
+	} else {
+		assert(max >= 5);
+		static const char hextable[] = "0123456789abcdef";
+		buf[0] = '0';
+		buf[1] = 'x';
+		buf[2] = hextable[(uint8_t) c >> 4];
+		buf[3] = hextable[c & 0xf];
+		buf[4] = '\0';
+	}
+}
+
+bool config_parse(string content)
+{
+	char  *src = content.data;
+	size_t len = content.size;
+	size_t cur = 0;
+
+	bool error = false;
+	for (;;) {
+
+		// Skip whitespace before the entry
+		while (cur < len && is_space(src[cur]))
+			cur++;
+		
+		if (cur == len)
+			break;
+		
+		if (src[cur] == '#') {
+			// Comment
+			while (cur < len && src[cur] != '\n')
+				cur++;
+			if (cur < len) {
+				assert(src[cur] == '\n');
+				cur++;
+			}
+		} else {
+		
+			// Expecting an identifier
+			if (!is_alpha(src[cur]) && src[cur] != '_') {
+				char buf[5];
+				make_char_printable(buf, sizeof(buf), src[cur]);
+				// Configs are handled before logging, so we need to write to stderr here
+				log_format("Could not parse config file (invalid character %s)\n", buf);
+				error = true;
+				break;
+			}
+
+			ConfigEntry entry;
+
+			size_t name_start = cur;
+			do
+				cur++;
+			while (cur < len && (is_alpha(src[cur]) || is_digit(src[cur]) || src[cur] == '_'));
+			entry.name = substr(content, name_start, cur);
+
+			while (cur < len && is_space(src[cur]) && src[cur] != '\n')
+				cur++;
+
+			if (cur == len) {
+				log_format("Missing value after '%.*s' in config file\n", (int) entry.name.size, entry.name.data);
+				error = true;
+				break;
+			}
+
+			if (cur+2 < len
+				&& src[cur+0] == 'y'
+				&& src[cur+1] == 'e'
+				&& src[cur+2] == 's'
+				&& (cur+3 == len || is_space(src[cur+3]))) {
+				entry.type = CE_BOOL;
+				entry.yes = true;
+				cur += 3;
+			} else if (cur+1 < len
+				&& src[cur+0] == 'n'
+				&& src[cur+1] == 'o'
+				&& (cur+2 == len || is_space(src[cur+2]))) {
+				entry.type = CE_BOOL;
+				entry.yes = false;
+				cur += 2;
+			} else if (src[cur] == '"') {
+				cur++; // Skip the first double quote
+				size_t value_start = cur;
+				while (cur < len && src[cur] != '"')
+					cur++;
+				entry.type = CE_STR;
+				entry.txt = substr(content, value_start, cur);
+				if (cur < len) {
+					assert(src[cur] == '"');
+					cur++;
+				}
+			} else if (is_digit(src[cur])) {
+				uint32_t value = 0;
+				do {
+					int d = src[cur] - '0';
+					if (value > (UINT32_MAX - d) / 10) {
+						log_format("Invalid value after '%.*s' in config file (Integer is too big)\n", (int) entry.name.size, entry.name.data);
+						error = true;
+						break;
+					}
+					value = value * 10 + d;
+					cur++;
+				} while (cur < len && is_digit(src[cur]));
+				if (error) break;
+				entry.type = CE_INT;
+				entry.num = value;
+			} else {
+				size_t value_start = cur;
+				while (cur < len && (is_print(src[cur]) && !is_space(src[cur])))
+					cur++;
+				entry.type = CE_STR;
+				entry.txt = substr(content, value_start, cur);
+			}
+
+			if (config_count == config_capacity) {
+				int   new_cap = MAX(2 * config_capacity, 32);
+				void *new_ptr = mymalloc(new_cap * sizeof(ConfigEntry));
+				if (new_ptr == NULL) {
+					log_format("Couldn't load config file (out of memory)\n");
+					error = true;
+					break;
+				}
+				if (config_count > 0)
+					memcpy(new_ptr, config_entries, config_count * sizeof(ConfigEntry));
+				myfree(config_entries, config_capacity * sizeof(ConfigEntry));
+				config_entries = new_ptr;
+				config_capacity = new_cap;
+			}
+			config_entries[config_count++] = entry;
+
+			// Skip the rest of the line
+			while (cur < len && is_space(src[cur]) && src[cur] != '\n')
+				cur++;
+
+			if (cur < len && src[cur] == '#')
+				while (cur < len && src[cur] != '\n')
+					cur++;
+			
+			if (cur < len) {
+				if (src[cur] != '\n') {
+					char buf[5];
+					make_char_printable(buf, sizeof(buf), src[cur]);
+					log_format("Invalid character %s after '%.*s' entry in config file\n", buf, (int) entry.name.size, entry.name.data);
+					error = true;
+					break;
+				}
+				cur++;
+			}
+		}
+	}
+
+	if (error) config_free();
+	return !error;
+}
+
+void config_init(void)
+{
+	config_content  = NULLSTR;
+	config_entries  = NULL;
+	config_count    = 0;
+	config_capacity = 0;
+}
+
+bool config_load(string file)
+{
+	config_init();
+
+	if (!load_file_contents(file, &config_content))
+		log_fatal(LIT("Could not load config file\n"));
+
+	if (!config_parse(config_content)) {
+		return false;
+	}
+
+	return true;
+}
+
+void config_free(void)
+{
+	if (config_entries) {
+		myfree(config_content.data, config_content.size);
+		myfree(config_entries, config_capacity * sizeof(ConfigEntry));
+		config_content  = NULLSTR;
+		config_entries  = NULL;
+		config_count    = 0;
+		config_capacity = 0;
+	}
+}
+
+ConfigEntry *config_any(string name)
+{
+	for (int i = 0; i < config_count; i++)
+		if (streq(name, config_entries[i].name))
+			return &config_entries[i];
+	return NULL;
+}
+
+string config_string(string name)
+{
+	ConfigEntry *entry = config_any(name);
+	if (entry == NULL) {
+		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
+		exit(-1);
+	}
+	if (entry->type != CE_STR) {
+		log_format("Config entry '%.*s' is not a string\n", (int) name.size, name.data);
+		exit(-1);
+	}
+	return entry->txt;
+}
+
+uint32_t config_int(string name)
+{
+	ConfigEntry *entry = config_any(name);
+	if (entry == NULL) {
+		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
+		exit(-1);
+	}
+	if (entry->type != CE_INT) {
+		log_format("Config entry '%.*s' is not a string\n", (int) name.size, name.data);
+		exit(-1);
+	}
+
+	return entry->num;
+}
+
+bool config_bool(string name)
+{
+	ConfigEntry *entry = config_any(name);
+	if (entry == NULL) {
+		log_format("Config entry '%.*s' is not defined\n", (int) name.size, name.data);
+		exit(-1);
+	}
+	if (entry->type != CE_BOOL) {
+		log_format("Config entry '%.*s' is not a boolean\n", (int) name.size, name.data);
+		exit(-1);
+	}
+
+	return entry->yes;
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////
 /// CERTIFICATE AND PRIVATE KEY PARSING (Adapted from BearSSL)                              ///
