@@ -1,0 +1,363 @@
+<html>
+	<head>
+		<link rel="stylesheet" media="screen" href="style.css" />
+	</head>
+	<body>
+		<article>
+
+<h1>A Gentle Introduction to TCP - Part 1
+</h1>
+<p>
+The TCP protocol is what we use to get computers to communicate. Computers on a network are identified by their IP address (a 4 byte integer). Each process using TCP on that computer is identified by a "port" (a 2 byte integer). The communication can only happen in pairs. One of the partecipants behaves as a "server" waiting for someone to connect, while the other behaves as "client", initiating the connections. Once the connection is established, client and server work the same way as far as TCP is concerned.
+
+In this post I'll show how to implement a simple TCP echo server which waits for a message and sends it back, and the client which sends a
+message.
+
+</p>
+<h2>The Server
+</h2>
+<p>To use TCP we need to use the socket interface provided by the OS. At first we'll look into the UNIX socket interface. Later we'll see the Windows one.
+
+This is the server:
+
+</p>
+<div class="c2h-code">
+  <div class="c2h-code-inner">
+    <table>
+      <tr><td>1</td><td><span class="c2h-directive">#define</span> <span class="c2h-identifier">ADDR</span> <span class="c2h-val-str">"127.0.0.1"</span>
+</td></tr>
+      <tr><td>2</td><td><span class="c2h-directive">#define</span> <span class="c2h-identifier">PORT</span> <span class="c2h-val-int">3000</span>
+</td></tr>
+      <tr><td>3</td><td>
+</td></tr>
+      <tr><td>4</td><td><span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier c2h-fdeclname">main</span>(<span class="c2h-kword c2h-kword-void">void</span>)
+</td></tr>
+      <tr><td>5</td><td>{
+</td></tr>
+      <tr><td>6</td><td>    <span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier">fd</span> <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">socket</span>(<span class="c2h-identifier">AF_INET</span>, <span class="c2h-identifier">SOCK_STREAM</span>, <span class="c2h-val-int">0</span>);
+</td></tr>
+      <tr><td>7</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">fd</span> <span class="c2h-operator">&lt;</span> <span class="c2h-val-int">0</span>) { <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"socket"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>; }
+</td></tr>
+      <tr><td>8</td><td>
+</td></tr>
+      <tr><td>9</td><td>    <span class="c2h-kword c2h-kword-struct">struct</span> <span class="c2h-identifier">sockaddr_in</span> <span class="c2h-identifier">bind_buffer</span>;
+</td></tr>
+      <tr><td>10</td><td>    <span class="c2h-identifier">bind_buffer</span>.<span class="c2h-identifier">sin_family</span> <span class="c2h-operator">=</span> <span class="c2h-identifier">AF_INET</span>;
+</td></tr>
+      <tr><td>11</td><td>    <span class="c2h-identifier">bind_buffer</span>.<span class="c2h-identifier">sin_addr</span>   <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">inet_addr</span>(<span class="c2h-identifier">ADDR</span>);
+</td></tr>
+      <tr><td>12</td><td>    <span class="c2h-identifier">bind_buffer</span>.<span class="c2h-identifier">sin_port</span>   <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">htons</span>(<span class="c2h-identifier">PORT</span>);
+</td></tr>
+      <tr><td>13</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier c2h-fcallname">bind</span>(<span class="c2h-identifier">fd</span>, (<span class="c2h-kword c2h-kword-struct">struct</span> <span class="c2h-identifier">sockaddr</span><span class="c2h-operator">*</span>) <span class="c2h-operator">&</span><span class="c2h-identifier">bind_buffer</span>, <span class="c2h-kword c2h-kword-sizeof">sizeof</span>(<span class="c2h-identifier">bind_buffer</span>))) {
+</td></tr>
+      <tr><td>14</td><td>        <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"bind"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>;
+</td></tr>
+      <tr><td>15</td><td>    }
+</td></tr>
+      <tr><td>16</td><td>
+</td></tr>
+      <tr><td>17</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier c2h-fcallname">listen</span>(<span class="c2h-identifier">fd</span>, <span class="c2h-val-int">8</span>)) {
+</td></tr>
+      <tr><td>18</td><td>        <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"listen"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>;
+</td></tr>
+      <tr><td>19</td><td>    }
+</td></tr>
+      <tr><td>20</td><td>
+</td></tr>
+      <tr><td>21</td><td>    <span class="c2h-kword c2h-kword-while">while</span> (<span class="c2h-val-int">1</span>) {
+</td></tr>
+      <tr><td>22</td><td>        <span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier">new_fd</span> <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">accept</span>(<span class="c2h-identifier">fd</span>, <span class="c2h-identifier">NULL</span>, <span class="c2h-identifier">NULL</span>);
+</td></tr>
+      <tr><td>23</td><td>        <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">new_fd</span> <span class="c2h-operator">&lt;</span> <span class="c2h-val-int">0</span>) {
+</td></tr>
+      <tr><td>24</td><td>            <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"accept"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>;
+</td></tr>
+      <tr><td>25</td><td>        }
+</td></tr>
+      <tr><td>26</td><td>
+</td></tr>
+      <tr><td>27</td><td>        <span class="c2h-kword c2h-kword-char">char</span> <span class="c2h-identifier">message</span>[<span class="c2h-val-int">128</span>];
+</td></tr>
+      <tr><td>28</td><td>        <span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier">len</span> <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">recv</span>(<span class="c2h-identifier">new_fd</span>, <span class="c2h-identifier">message</span>, <span class="c2h-kword c2h-kword-sizeof">sizeof</span>(<span class="c2h-identifier">message</span>)<span class="c2h-operator">-</span><span class="c2h-val-int">1</span>);
+</td></tr>
+      <tr><td>29</td><td>        <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">len</span> <span class="c2h-operator">&lt;</span> <span class="c2h-val-int">0</span>) { <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"recv"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>; }
+</td></tr>
+      <tr><td>30</td><td>
+</td></tr>
+      <tr><td>31</td><td>        <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">len</span> <span class="c2h-operator">&gt;</span> <span class="c2h-val-int">0</span>)
+</td></tr>
+      <tr><td>32</td><td>            <span class="c2h-identifier c2h-fcallname">send</span>(<span class="c2h-identifier">new_fd</span>, <span class="c2h-identifier">message</span>, <span class="c2h-identifier">len</span>);
+</td></tr>
+      <tr><td>33</td><td>
+</td></tr>
+      <tr><td>34</td><td>        <span class="c2h-identifier c2h-fcallname">close</span>(<span class="c2h-identifier">new_fd</span>);
+</td></tr>
+      <tr><td>35</td><td>    }
+</td></tr>
+      <tr><td>36</td><td>
+</td></tr>
+      <tr><td>37</td><td>    <span class="c2h-identifier c2h-fcallname">close</span>(<span class="c2h-identifier">fd</span>);
+</td></tr>
+      <tr><td>38</td><td>    <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-val-int">0</span>;
+</td></tr>
+      <tr><td>39</td><td>}
+</td></tr>
+      <tr><td>40</td><td></td></tr>
+    </table>
+  </div>
+</div>
+<p>
+
+</p>
+<h3>socket, perror
+</h3>
+<p>To use TCP we need to set up a "socket", a kernel object we create to keep track of states of new and old connections. A socket can be a listening socket or a connection socket. A listening socket is something required to create one or more connection sockets. The connection sockets represent the actual communication with another computer.
+
+The <code>socket</code> function creates the socket and returns an integer which identifies the socket object within the kernel. The integer must be non-negative to be valid, so if we get -1 it means an error occurred. If an error occurred, socket sets the <code>errno</code> value. We call <code>perror</code> to print out the function that failed and the text description of the <code>errno</code>.
+
+The <code>socket</code> function takes three arguments. We are only interested in using TCP over IPv4, so the first argument must be <code>AF_INET</code> to set IPv4 and the second must be <code>SOCK_STREAM</code> to set TCP. The third argument is unused so we pass zero.
+
+
+</p>
+<h3>bind, dotted-decimal notation, and byte ordering
+</h3>
+<p>The socket we just created will be used as a "listener". In other words, it's the object that establishes new connections and produces new connection sockets representing them. Now we use the <code>bind</code> function to specify which IP address and TCP port we are going to listen for connections on. The IP we specify here is not of other computers but our own. This is necessary as a computer could have multiple IP addresses. The way this works is we put the information in the <code>sockaddr_in</code> structure, and then call <code>bind</code> telling it to apply this configuration to the <code>fd</code> socket.
+
+</p>
+<div class="c2h-code">
+  <div class="c2h-code-inner">
+    <table>
+      <tr><td>1</td><td><span class="c2h-kword c2h-kword-struct">struct</span> <span class="c2h-identifier">in_addr</span> {
+</td></tr>
+      <tr><td>2</td><td>    <span class="c2h-kword c2h-kword-unsigned">unsigned</span> <span class="c2h-kword c2h-kword-long">long</span> <span class="c2h-identifier">s_addr</span>;
+</td></tr>
+      <tr><td>3</td><td>};
+</td></tr>
+      <tr><td>4</td><td>
+</td></tr>
+      <tr><td>5</td><td><span class="c2h-kword c2h-kword-struct">struct</span> <span class="c2h-identifier">sockaddr_in</span> {
+</td></tr>
+      <tr><td>6</td><td>    <span class="c2h-kword c2h-kword-short">short</span>          <span class="c2h-identifier">sin_family</span>;
+</td></tr>
+      <tr><td>7</td><td>    <span class="c2h-kword c2h-kword-unsigned">unsigned</span> <span class="c2h-kword c2h-kword-short">short</span> <span class="c2h-identifier">sin_port</span>;
+</td></tr>
+      <tr><td>8</td><td>    <span class="c2h-kword c2h-kword-struct">struct</span> <span class="c2h-identifier">in_addr</span> <span class="c2h-identifier">sin_addr</span>;
+</td></tr>
+      <tr><td>9</td><td>    <span class="c2h-kword c2h-kword-char">char</span>           <span class="c2h-identifier">sin_zero</span>[<span class="c2h-val-int">8</span>];
+</td></tr>
+      <tr><td>10</td><td>};
+</td></tr>
+      <tr><td>11</td><td></td></tr>
+    </table>
+  </div>
+</div>
+<p>
+
+The <code>bind</code> function does not know what type of address we are specifying, so once again we need to specify IPv4 by setting <code>AF_INET</code> to the <code>sin_family</code> field. Then we set the IP address to <code>sin_addr</code> and the TCP port to <code>sin_port</code>. If the function succeeds 0 is returned, else -1 and the <code>errno</code> is set.
+
+The IP address is represented by one 32 bit string, but usually we express it in dotted-decimal form. Each one of the four bytes is expressed in base 10 and a dot is used to separate the bytes:
+
+</p>
+<pre><code>127.0.0.1
+</code></pre>
+<p>
+the single bytes are represented in binary as:
+
+</p>
+<pre><code>127 -&gt; 01111111
+0   -&gt; 00000000
+0   -&gt; 00000000
+1   -&gt; 00000001
+</code></pre>
+<p>
+so the actual bit string ends up being:
+
+</p>
+<pre><code>01111111000000000000000000000001
+</code></pre>
+<p>
+the <code>inet_addr</code> perform this conversion for us.
+
+Before setting the port value, we need to convert it to the "network byte order" using <code>htons</code>.
+
+By "byte order" we mean how CPUs store multi-byte values in memory. Lets say we have the number 1 stored in a 4 byte unsigned integer. Its binary representation is:
+
+</p>
+<pre><code>00000000 00000000 00000000 00000001
+</code></pre>
+<p>
+</p>
+<pre><code>(i split the bits in groups of 8 to make it easier to read.)
+</code></pre>
+<p>
+Of course computers store things as bytes (groups of 8 bits), so this 4 byte number will span over 4 addressable memory cells. When we say we're storing the number at address 1000, what we really mean is we are storing its bytes from address 1000 to 1003. When we want its value back from the memory the CPU will read the four bytes into the original 32 bit value. Notice how it does not matter how the four bytes are stored. The CPU could mix up the order as long as it remembers that order next time it loads it and everything will work. Turns out, that's exactly what happens! Different computers (more precisely their CPUs) store bytes in different orders. There are two main ways to order bytes: little endian and big endian. The number 16975631 stored in 32 bits is logically represented as:
+
+</p>
+<pre><code>000000001 00000011 00000111 00001111
+</code></pre>
+<p>
+And here is how it's represented on different endianesses
+
+</p>
+<pre><code>1000     1001     1002     1003
+00000001 00000011 00000111 00001111     big endian
+</code></pre>
+<p>
+</p>
+<pre><code>1000     1001     1002     1003
+00001111 00000111 00000011 00000001     little endian
+</code></pre>
+<p>
+Due to this difference, any time computers transmit to each other strings of bits representing multi-byte values, they need to coordinate on which byte ordering to use. Based on that, the computer with the other ordering will need to invert the bytes. In most network protocols the ordering used is big endian.
+
+Because port numbers are two bytes wide, we need to make sure they are stored as big endian in the <code>sockaddr_in</code> buffer. The <code>htons</code> function stands for <code>host-to-network short</code> and converts whichever byte ordering we (the host) have to big endian. If we are already big endian (unlikely) it does nothing. If we are little endian it inverts the bytes. There are similar functions to convert larger data types or convert the other way around like <code>htonl</code>, <code>ntohs</code>, and <code>ntohl</code>.
+
+</p>
+<h3>listen
+</h3>
+<p>Now that the socket is configured we can start listening for new connections! We do so using the <code>listen</code> function. The first argument is the listening socket we want to listen with. The second argument is the "backlog" size. The way TCP applications usually work is they accept one or more connections using the <code>accept</code> function (more on that later) and then go do some work for a bit. When they're done they accept new connections. It is possible that new connections are established faster than the program can accept them, resulting in them "piling up". The backlog is the maximum count of connection requests that can wait before being rejected. For instance, if we use a backlog of 3 and we receive 4 connections, the last one will be rejected. This value does not need to be high as programs usually accept connections very fast. Still I like to set something greater than 1. As for <code>bind</code>, <code>listen</code> returns 0 on success, else -1 and sets <code>errno</code>.
+
+</p>
+<h3>accept
+</h3>
+<p>Now that we brought the socket to the listening state we can accept new connections. We use the <code>accept</code> function for this. The way this works is when this function is called, the program stops and waits for incoming connections. When a new connection request arrives the kernel automatically creates a socket object and returns its descriptor as the return value of <code>accept</code>. If the return value is -1, the function failed (and <code>errno</code> is set). The first argument is the listening socket we want to accept a connection from, and the other two are "optional" arguments. They return the address of the machine we are talking to. If we are not interested we can keep them <code>NULL</code>.
+
+</p>
+<h3>send, recv, and close
+</h3>
+<p>Once we acquired a valid file descriptor from <code>accept</code> we can read bytes coming from the other computer using the <code>recv</code> function and send bytes using the <code>send</code> function. You can also use <code>read</code> and <code>write</code>.
+
+The <code>recv</code> function takes as first argument the connection socket. The second and third arguments are the destination buffer's location and size. The last argument is used to specify different options. You usually keep it to zero. The function returns the number of bytes received and written to the destination buffer, 0 if the connection was closed by the other machine, and -1 if an error occurred (and <code>errno</code> is set). The <code>read</code> call is equivalent to <code>recv</code> with no options set. When successful this function can return any number of bytes from 1 to the destination buffer's size.
+
+The <code>send</code> function is analogous to <code>recv</code>. The first argument is the socket, the second and third arguments specify the source buffer, and the last argument is for extra options. You usually set it to zero. This function returns the number of read bytes on success or -1 when it fails (it sets <code>errno</code>). The number of sent bytes can be anything from 0 to the size of the source buffer. In practice, you won't get the 0 return value unless the source buffer has a length of 0.
+
+When you're done talking with the other machine you can tell the kernel to delete the socket object by calling <code>close</code> on its descriptor. You can do this on a specific connection or on the listening socket if you're not interested in establishing new connections. If you close the listener, the connections that were already established will continue working. The <code>close</code> function also can fail, but I rarely find it useful to check for errors here.
+
+</p>
+<h2>The client
+</h2>
+<p>This is the client:
+
+</p>
+<div class="c2h-code">
+  <div class="c2h-code-inner">
+    <table>
+      <tr><td>1</td><td><span class="c2h-directive">#define</span> <span class="c2h-identifier">SERVER_ADDR</span> <span class="c2h-val-str">"127.0.0.1"</span>
+</td></tr>
+      <tr><td>2</td><td><span class="c2h-directive">#define</span> <span class="c2h-identifier">SERVER_PORT</span> <span class="c2h-val-int">3000</span>
+</td></tr>
+      <tr><td>3</td><td>
+</td></tr>
+      <tr><td>4</td><td><span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier c2h-fdeclname">main</span>(<span class="c2h-kword c2h-kword-void">void</span>)
+</td></tr>
+      <tr><td>5</td><td>{
+</td></tr>
+      <tr><td>6</td><td>    <span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier">fd</span> <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">socket</span>(<span class="c2h-identifier">AF_INET</span>, <span class="c2h-identifier">SOCK_STREAM</span>, <span class="c2h-val-int">0</span>);
+</td></tr>
+      <tr><td>7</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">fd</span> <span class="c2h-operator">&lt;</span> <span class="c2h-val-int">0</span>) { <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"socket"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>; }
+</td></tr>
+      <tr><td>8</td><td>
+</td></tr>
+      <tr><td>9</td><td>    <span class="c2h-kword c2h-kword-struct">struct</span> <span class="c2h-identifier">sockaddr_in</span> <span class="c2h-identifier">connect_buffer</span>;
+</td></tr>
+      <tr><td>10</td><td>    <span class="c2h-identifier">connect_buffer</span>.<span class="c2h-identifier">sin_family</span> <span class="c2h-operator">=</span> <span class="c2h-identifier">AF_INET</span>;
+</td></tr>
+      <tr><td>11</td><td>    <span class="c2h-identifier">connect_buffer</span>.<span class="c2h-identifier">sin_addr</span>   <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">inet_addr</span>(<span class="c2h-identifier">SERVER_ADDR</span>);
+</td></tr>
+      <tr><td>12</td><td>    <span class="c2h-identifier">connect_buffer</span>.<span class="c2h-identifier">sin_port</span>   <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">htons</span>(<span class="c2h-identifier">SERVER_PORT</span>);
+</td></tr>
+      <tr><td>13</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier c2h-fcallname">connect</span>(<span class="c2h-identifier">fd</span>, <span class="c2h-operator">&</span><span class="c2h-identifier">connect_buffer</span>, <span class="c2h-kword c2h-kword-sizeof">sizeof</span>(<span class="c2h-identifier">connect_buffer</span>))) {
+</td></tr>
+      <tr><td>14</td><td>        <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"listen"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>;
+</td></tr>
+      <tr><td>15</td><td>    }
+</td></tr>
+      <tr><td>16</td><td>
+</td></tr>
+      <tr><td>17</td><td>    <span class="c2h-kword c2h-kword-char">char</span> <span class="c2h-identifier">message</span>[] <span class="c2h-operator">=</span> <span class="c2h-val-str">"Hello!"</span>;
+</td></tr>
+      <tr><td>18</td><td>    <span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier">res</span> <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">send</span>(<span class="c2h-identifier">fd</span>, <span class="c2h-identifier">message</span>, <span class="c2h-kword c2h-kword-sizeof">sizeof</span>(<span class="c2h-identifier">message</span>)<span class="c2h-operator">-</span><span class="c2h-val-int">1</span>);
+</td></tr>
+      <tr><td>19</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">res</span> <span class="c2h-operator">&lt;</span> <span class="c2h-val-int">0</span>) { <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"send"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>; }
+</td></tr>
+      <tr><td>20</td><td>
+</td></tr>
+      <tr><td>21</td><td>    <span class="c2h-identifier c2h-fcallname">printf</span>(<span class="c2h-val-str">"Sent: %s\n"</span>, <span class="c2h-identifier">messaage</span>);
+</td></tr>
+      <tr><td>22</td><td>
+</td></tr>
+      <tr><td>23</td><td>    <span class="c2h-kword c2h-kword-char">char</span> <span class="c2h-identifier">reply</span>[<span class="c2h-val-int">128</span>];
+</td></tr>
+      <tr><td>24</td><td>    <span class="c2h-kword c2h-kword-int">int</span> <span class="c2h-identifier">len</span> <span class="c2h-operator">=</span> <span class="c2h-identifier c2h-fcallname">recv</span>(<span class="c2h-identifier">fd</span>, <span class="c2h-identifier">reply</span>, <span class="c2h-kword c2h-kword-sizeof">sizeof</span>(<span class="c2h-identifier">reply</span>));
+</td></tr>
+      <tr><td>25</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">len</span> <span class="c2h-operator">&lt;</span> <span class="c2h-val-int">0</span>) { <span class="c2h-identifier c2h-fcallname">perror</span>(<span class="c2h-val-str">"recv"</span>); <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-operator">-</span><span class="c2h-val-int">1</span>; }
+</td></tr>
+      <tr><td>26</td><td>    <span class="c2h-identifier">reply</span>[<span class="c2h-identifier">len</span>] <span class="c2h-operator">=</span> <span class="c2h-val-char">'\0'</span>;
+</td></tr>
+      <tr><td>27</td><td>
+</td></tr>
+      <tr><td>28</td><td>    <span class="c2h-kword c2h-kword-if">if</span> (<span class="c2h-identifier">len</span> <span class="c2h-operator">&gt;</span> <span class="c2h-val-int">0</span>) {
+</td></tr>
+      <tr><td>29</td><td>        <span class="c2h-identifier c2h-fcallname">printf</span>(<span class="c2h-val-str">"Received: %s\n"</span>, <span class="c2h-identifier">reply</span>);
+</td></tr>
+      <tr><td>30</td><td>    }
+</td></tr>
+      <tr><td>31</td><td>
+</td></tr>
+      <tr><td>32</td><td>    <span class="c2h-identifier c2h-fcallname">close</span>(<span class="c2h-identifier">fd</span>);
+</td></tr>
+      <tr><td>33</td><td>    <span class="c2h-kword c2h-kword-return">return</span> <span class="c2h-val-int">0</span>;
+</td></tr>
+      <tr><td>34</td><td>}
+</td></tr>
+      <tr><td>35</td><td></td></tr>
+    </table>
+  </div>
+</div>
+<p>
+The differences are:
+</p>
+
+<ol>
+<li>Calling <code>bind</code> is optional
+</li>
+<li>We use <code>connect</code> instead of <code>listen/accept</code>
+</li>
+<li>There is no loop
+</li>
+</ol>
+<p>
+</p>
+<h3>socket
+</h3>
+<p>The socket creation is the same as the server. The only difference is that we create a connection socket (not a listener) from the start. This socket is not yet active. We need to use the <code>connect</code> function to actually establish a connection with a specific machine. 
+
+</p>
+<h3>Not using bind
+</h3>
+<p>The call to <code>bind</code> associates a specific IP address and port to our socket. Without it, the OS would just give us a random port number! This is necessary for server so that clients know which port to connect to. If the server choose used a random port whenever it started up, no clients could ever connect to it. This is not the case for clients, so we can use whichever port the OS decides to gives us.
+
+</p>
+<h3>connect
+</h3>
+<p>The <code>connect</code> function takes a socket descriptor as first argument. This is the socket that will be used to connect. The second and third arguments are used to specify the location of the machine to connect to. We need to fill in the <code>sockaddr_in</code> just like we did for the server, with the only exception that the information is relative to the other machine, not ourselves. If everything went OK and the connection is established, 0 is returned. If someting went wrong, -1 is returned and <code>errno</code> is set. From this point on, it's possible to use <code>recv</code> and <code>send</code> on that connection.
+
+</p>
+<h2>Disclaimer
+</h2>
+<p>This is just an example program. Here is a list of changes I would make if I had to use this in the real world:
+</p>
+
+<ol>
+<li>Don't abort the program when <code>accept</code> fails
+</li>
+<li>Don't assume the entire message is received in one <code>recv</code> call. You need to call it in a loop to make sure everything is received and properly handle interruptions (see <code>EINTR</code>)
+</li>
+<li>Don't assume <code>send</code> handles the entire buffer in one call. You need to call it in a loop to make sure everything is sent and properly handle interruptions (see <code>EINTR</code>)
+</li>
+<li>Use non-blocking sockets to avoid stalling for slow (or malicious) machines</li>
+</ol>
+
+		</article>
+	</body>
+</html>
