@@ -12,6 +12,9 @@ int auth_init(Auth *auth, string password_file, b8 skip_auth_check, Logger *logg
         auth->password = EMPTY_STRING;
     } else {
 
+        if (password_file.len == 0)
+            return -1;
+
         string password;
         int ret = file_read_all(password_file, &password);
         if (ret < 0)
